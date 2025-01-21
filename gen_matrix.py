@@ -3,13 +3,14 @@
 # for each parquet it selects the top 2048 stocks, fills in missing minutes with previous price data, and pivots the parquet
 # to a (minutes) x (2048*3) dataframe and saves it to a new parquet in the output dir.
 # the new columns are STOCK_open STOCK_close STOCK_volume for each of the 2048 STOCKs, so 2048*3 columns
+# also, restricts to trading hours
 
 import os
 import pandas as pd
 from pathlib import Path
 from tqdm import tqdm  # Import tqdm for progress bar
 
-# Directories for options and stock data
+# input and output directories
 stocks_dir = "us_stocks_sip/minute_aggs_parquet/"
 output_dir = "us_stocks_sip/minute_aggs_matrix/"
 
