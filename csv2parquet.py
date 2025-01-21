@@ -49,46 +49,6 @@ class StockDataPreprocessor:
         date_path = self.out_dir / file.parts[-1].replace(".csv.gz", ".parquet")
         pq.write_table(pa.Table.from_pandas(df), date_path)
 
-class StockDataQuery:
-    def __init__(self, out_dir):
-        self.out_dir = Path(out_dir)
-
-    def query(self, date, start_time, end_time):
-        """
-        Query data for a specific date and time range.
-
-        Args:
-            date (str): Date in YYYY-MM-DD format.
-            start_time (str): Start time in ISO format.
-            end_time (str): End time in ISO format.
-
-        Returns:
-            pd.DataFrame: Query result.
-        """
-        date_path = self.out_dir / f"{date}.parquet"
-        if not date_path.exists():
-            raise FileNotFoundError(f"Data for date {date} not found.")
-
-        # Load the Parquet file
-        table = pq.read_table(date_path)
-        df = table.to_pandas()
-
-        # Filter by time range
-        df.index = pd.to_datetime(df.index)
-        start_time = pd.to_datetime(start_time)
-        end_time = pd.to_datetime(end_time)
-        return df.loc[start_time:end_time]
-
-    def list_dates(self):
-        """
-        List all dates available in the database.
-
-        Returns:
-            list: List of dates in YYYY-MM-DD format.
-        """
-        dates = [file.stem for file in self.out_dir.glob("*.parquet")]
-        return sorted(dates)
-
 # Example Usage
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Reindex stock data and store it in Parquet format.")
