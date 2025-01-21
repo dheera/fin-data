@@ -21,10 +21,7 @@ market_close = "16:00:00"
 # Ensure the output directory exists
 os.makedirs(output_dir, exist_ok=True)
 
-# List all files in the options directory (assumes filenames are dates)
 stocks_files = sorted(Path(stocks_dir).glob("*.parquet"))
-
-# Create a set of dates present in both directories
 stocks_dates = {f.stem for f in stocks_files}
 
 # Process each date
