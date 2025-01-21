@@ -1,0 +1,8 @@
+{
+  "key_name": "Default",
+  "api_key": "foo",
+  "s3_access_key_id": "foo",
+  "s3_secret_access_key": "foo",
+  "s3_endpoint": "https://files.polygon.io",
+  "s3_bucket": "flatfiles"
+}
