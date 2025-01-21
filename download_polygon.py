@@ -30,7 +30,7 @@ def download(prefix, year_start = 2021, year_end = 2026):
     for object_key in to_download:
         print(f"Downloading {object_key}")
         local_file_name = object_key.split('/')[-1]
-        local_file_path = '/ml/fin/' + prefix + local_file_name
+        local_file_path = './' + prefix + local_file_name
     
         try:
             result = s3.download_file(bucket_name, object_key, local_file_path)
