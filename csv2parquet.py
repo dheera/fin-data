@@ -36,6 +36,11 @@ class StockDataPreprocessor:
         Args:
             file (Path): Path to the CSV file.
         """
+        date_path = self.out_dir / file.parts[-1].replace(".csv.gz", ".parquet")
+        if os.path.exists(date_path):
+            print(f"Exists, skipping: {date_path}")
+            return
+
         df = pd.read_csv(file)
 
         # Convert timestamp to datetime index
@@ -43,10 +48,10 @@ class StockDataPreprocessor:
         for field in ['open', 'close', 'high', 'low']:
             df[field] = df[field].astype('float32')
         for field in ['volume', 'transactions']:
-            df[field] = df[field].astype('int32')
+            if field in df.columns:
+                df[field] = df[field].astype('int32')
         df.set_index(['ticker', 'window_start'], inplace=True)
 
-        date_path = self.out_dir / file.parts[-1].replace(".csv.gz", ".parquet")
         pq.write_table(pa.Table.from_pandas(df), date_path)
 
 # Example Usage
