@@ -27,6 +27,11 @@ stocks_dates = {f.stem for f in stocks_files}
 # Process each date
 for date in tqdm(sorted(stocks_dates), desc="Processing Files"):
     stocks_file = Path(stocks_dir) / f"{date}.parquet"
+    output_file = Path(output_dir) / f"{date}.parquet"
+
+    if os.path.exists(output_file):
+        print(f"Exists, skipping: {output_file}")
+        continue
 
     # Read the data
     stocks_data = pd.read_parquet(stocks_file)
@@ -74,7 +79,6 @@ for date in tqdm(sorted(stocks_dates), desc="Processing Files"):
     pivoted_data.columns = [f"{stock}_{col}" for col, stock in pivoted_data.columns]
 
     # Save the processed data
-    output_file = Path(output_dir) / f"{date}.parquet"
     pivoted_data.to_parquet(output_file, index=True)
 
     print(f"Processed and saved: {output_file}")
