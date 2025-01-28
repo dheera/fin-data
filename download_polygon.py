@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 import os
 import boto3
 from botocore.config import Config
@@ -31,11 +32,15 @@ def download(prefix, year_start = 2021, year_end = 2026):
 
     os.makedirs(os.path.join(".", prefix), exist_ok=True)
     for object_key in to_download:
-        print(f"Downloading {object_key}")
         local_file_name = object_key.split('/')[-1]
         local_file_path = os.path.join('.' , prefix , local_file_name)
+
+        if os.path.exists(local_file_path):
+            print(f"Exists, skipping: {object_key}")
+            continue
     
         try:
+            print(f"Downloading {object_key}")
             result = s3.download_file(bucket_name, object_key, local_file_path)
         except Exception as e:
             print(e)
