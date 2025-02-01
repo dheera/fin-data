@@ -29,15 +29,13 @@ market_close = "16:00:00"
 os.makedirs(output_dir, exist_ok=True)
 
 # --------------------------------------------------------------------------------------
-# Helper functions to compute technical indicators
+# Helper function to compute technical indicators
 # --------------------------------------------------------------------------------------
 def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """
     Given a DataFrame for a single ticker, containing:
         window_start, open, high, low, close, volume, ticker
-    compute and return the same DataFrame with columns:
-        ema12, ema26, macd, rsi, vwap
-    appended.
+    compute the following columns: ema12, ema26, macd, rsi, vwap.
     """
     # Sort by time to ensure calculations are in correct chronological order
     df = df.sort_values("window_start")
@@ -47,7 +45,7 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["ema26"] = df["close"].ewm(span=26, min_periods=1).mean()
     df["macd"]  = df["ema12"] - df["ema26"]
 
-    # --- RSI (14-period, using typical exponential/EMA method) ---
+    # --- RSI (14-period, using exponential moving average) ---
     period = 14
     delta = df["close"].diff()
     gain = delta.where(delta > 0, 0.0)
@@ -61,10 +59,10 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     # --- VWAP ---
     typical_price = (df["high"] + df["low"] + df["close"]) / 3.0
     cum_vp = (typical_price * df["volume"]).cumsum()
-    cum_volume = df["volume"].cumsum()
-    df["vwap"] = cum_vp / cum_volume
+    cum_vol = df["volume"].cumsum()
+    df["vwap"] = cum_vp / cum_vol
 
-    # Final fill to ensure no NaNs remain after boundary calculations
+    # Forward/backward fill any boundary NaNs
     df = df.fillna(method="ffill").fillna(method="bfill")
 
     return df
@@ -96,9 +94,9 @@ for date in tqdm(sorted(stocks_dates), desc="Processing Files"):
         (stocks_data["window_start"].dt.time <= pd.to_datetime(market_close).time())
     ]
 
-    # Keep open, close, high, low, volume; drop other extraneous columns
+    # Keep open, close, high, low, volume; drop anything else (e.g. transactions)
     drop_cols = set(stocks_data.columns) - {
-        "window_start","ticker","open","high","low","close","volume"
+        "window_start", "ticker", "open", "high", "low", "close", "volume"
     }
     stocks_data.drop(columns=list(drop_cols), inplace=True)
 
@@ -116,12 +114,12 @@ for date in tqdm(sorted(stocks_dates), desc="Processing Files"):
     )
     full_minutes_df = pd.DataFrame({"window_start": full_minutes})
 
-    # Merge, fill missing minutes, and compute indicators for each stock
+    # Merge, fill missing minutes, compute indicators for each stock
     filled_data = []
     for ticker, group in stocks_data.groupby("ticker"):
         merged_group = full_minutes_df.merge(group, on="window_start", how="left")
 
-        # Forward/backward fill core columns
+        # Forward/backward fill the core OHLC columns
         merged_group[["open","high","low","close"]] = (
             merged_group[["open","high","low","close"]].ffill().bfill()
         )
@@ -135,22 +133,27 @@ for date in tqdm(sorted(stocks_dates), desc="Processing Files"):
     # Combine all tickers back together
     stocks_data = pd.concat(filled_data, ignore_index=True)
 
-    # Pivot the data so rows = minutes, columns = <TICKER>_<FEATURE>
-    pivoted_data = stocks_data.pivot(
+    # Pivot (actually pivot_table for safety in case of duplicates)
+    # We'll keep these columns: open, high, low, close, volume, ema12, ema26, macd, rsi, vwap
+    # index = each minute, columns = each ticker, values = these features
+    pivoted_data = pd.pivot_table(
+        stocks_data,
         index="window_start",
         columns="ticker",
-        values=[
-            "open","high","low","close","volume",
-            "ema12","ema26","macd","rsi","vwap"
-        ]
+        values=["open","high","low","close","volume","ema12","ema26","macd","rsi","vwap"],
+        aggfunc="first"  # if duplicates exist, take the first row
     )
 
     # Flatten the MultiIndex columns: (feature, ticker) -> "TICKER_feature"
-    pivoted_data.columns = [f"{stock}_{col}" for col, stock in pivoted_data.columns]
+    pivoted_data.columns = [f"{ticker}_{feature}" for feature, ticker in pivoted_data.columns]
 
-    # Final check: ensure no NaNs in the entire DataFrame
+    # Print column names to confirm the indicators are present
+    print(f"Final columns for {date}:")
+    print(list(pivoted_data.columns))
+
+    # Check for NaNs
     if pivoted_data.isna().any().any():
-        raise ValueError(f"NaNs found in the final dataframe for date={date}.")
+        raise ValueError(f"NaNs found in final dataframe for date={date}.")
 
     # Save the processed data
     pivoted_data.to_parquet(output_file, index=True)
