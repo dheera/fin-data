@@ -63,7 +63,7 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["vwap"] = cum_vp / cum_vol
 
     # Forward/backward fill any boundary NaNs
-    df = df.fillna(method="ffill").fillna(method="bfill")
+    df = df.ffill().bfill()
 
     return df
 
@@ -146,10 +146,6 @@ for date in tqdm(sorted(stocks_dates), desc="Processing Files"):
 
     # Flatten the MultiIndex columns: (feature, ticker) -> "TICKER_feature"
     pivoted_data.columns = [f"{ticker}_{feature}" for feature, ticker in pivoted_data.columns]
-
-    # Print column names to confirm the indicators are present
-    print(f"Final columns for {date}:")
-    print(list(pivoted_data.columns))
 
     # Check for NaNs
     if pivoted_data.isna().any().any():
