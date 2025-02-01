@@ -27,14 +27,6 @@ def parse_args():
 
     return parser.parse_args()
 
-
-# --------------------------------------------------------------------------------------
-# Global Constants for Trading Hours, etc.
-# --------------------------------------------------------------------------------------
-market_open = "09:30:00"
-market_close = "16:00:00"
-
-
 # --------------------------------------------------------------------------------------
 # Helper function: compute technical indicators
 # --------------------------------------------------------------------------------------
@@ -114,6 +106,11 @@ def main():
             pd.to_datetime(stocks_data["window_start"], utc=True)
               .dt.tz_convert("America/New_York")
         )
+
+        # NY trading hours
+        market_open = "09:30:00"
+        market_close = "16:00:00"
+
         stocks_data = stocks_data[
             (stocks_data["window_start"].dt.time >= pd.to_datetime(market_open).time()) &
             (stocks_data["window_start"].dt.time <= pd.to_datetime(market_close).time())
