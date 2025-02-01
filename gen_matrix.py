@@ -2,34 +2,41 @@
 
 import sys
 import os
+import argparse
 import pandas as pd
 from pathlib import Path
 from tqdm import tqdm
 
 # --------------------------------------------------------------------------------------
-# 1. Accept command-line arguments for input and output directories
+# 1. Parse command-line arguments using argparse
 # --------------------------------------------------------------------------------------
-if len(sys.argv) < 3:
-    print(f"Usage: {sys.argv[0]} <input_directory> <output_directory>")
-    sys.exit(1)
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Generate minute-based matrices from stock parquet data."
+    )
+    parser.add_argument("input_dir", type=str,
+        help="Directory containing input .parquet files.")
+    parser.add_argument("output_dir", type=str,
+        help="Directory to save the output .parquet files.")
 
-stocks_dir = sys.argv[1]
-output_dir = sys.argv[2]
+    parser.add_argument("--no-indicators", action="store_true",
+        help="If set, do NOT compute technical indicators (ema12, ema26, macd, rsi, vwap).")
+
+    parser.add_argument("--top-stocks", type=int, default=1024,
+        help="Number of top stocks to keep (by 'close * volume'). 0 means keep all stocks.")
+
+    return parser.parse_args()
+
 
 # --------------------------------------------------------------------------------------
-# Parameter for how many top stocks to keep
+# Global Constants for Trading Hours, etc.
 # --------------------------------------------------------------------------------------
-TOP_STOCKS = 1024
-
-# NYSE trading hours in Eastern Time
 market_open = "09:30:00"
 market_close = "16:00:00"
 
-# Ensure the output directory exists
-os.makedirs(output_dir, exist_ok=True)
 
 # --------------------------------------------------------------------------------------
-# Helper function to compute technical indicators
+# Helper function: compute technical indicators
 # --------------------------------------------------------------------------------------
 def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -57,102 +64,158 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     df["rsi"] = 100 - (100 / (1.0 + rs))
 
     # --- VWAP ---
-    typical_price = (df["high"] + df["low"] + df["close"]) / 3.0
-    cum_vp = (typical_price * df["volume"]).cumsum()
-    cum_vol = df["volume"].cumsum()
-    df["vwap"] = cum_vp / cum_vol
+    if "volume" in df.columns:
+        typical_price = (df["high"] + df["low"] + df["close"]) / 3.0
+        cum_vp = (typical_price * df["volume"]).cumsum()
+        cum_vol = df["volume"].cumsum()
+        df["vwap"] = cum_vp / cum_vol
+    else:
+        # If there's no volume, we can't compute VWAP
+        df["vwap"] = pd.NA
 
     # Forward/backward fill any boundary NaNs
     df = df.ffill().bfill()
 
     return df
 
+
 # --------------------------------------------------------------------------------------
-# Main processing loop
+# Main function
 # --------------------------------------------------------------------------------------
-stocks_files = sorted(Path(stocks_dir).glob("*.parquet"))
-stocks_dates = {f.stem for f in stocks_files}
+def main():
+    args = parse_args()
+    stocks_dir = args.input_dir
+    output_dir = args.output_dir
+    no_indicators = args.no_indicators
+    top_stocks_num = args.top_stocks
 
-for date in tqdm(sorted(stocks_dates), desc="Processing Files"):
-    stocks_file = Path(stocks_dir) / f"{date}.parquet"
-    output_file = Path(output_dir) / f"{date}.parquet"
+    # Ensure the output directory exists
+    os.makedirs(output_dir, exist_ok=True)
 
-    if output_file.exists():
-        print(f"Exists, skipping: {output_file}")
-        continue
+    # Gather all parquet files
+    stocks_files = sorted(Path(stocks_dir).glob("*.parquet"))
+    stocks_dates = {f.stem for f in stocks_files}
 
-    # Read the data
-    stocks_data = pd.read_parquet(stocks_file).reset_index()
+    for date in tqdm(sorted(stocks_dates), desc="Processing Files"):
+        stocks_file = Path(stocks_dir) / f"{date}.parquet"
+        output_file = Path(output_dir) / f"{date}.parquet"
 
-    # Convert window_start to Eastern Time and restrict to NYSE trading hours
-    stocks_data["window_start"] = (
-        pd.to_datetime(stocks_data["window_start"], utc=True)
-          .dt.tz_convert("America/New_York")
-    )
-    stocks_data = stocks_data[
-        (stocks_data["window_start"].dt.time >= pd.to_datetime(market_open).time()) &
-        (stocks_data["window_start"].dt.time <= pd.to_datetime(market_close).time())
-    ]
+        if output_file.exists():
+            print(f"Exists, skipping: {output_file}")
+            continue
 
-    # Keep open, close, high, low, volume; drop anything else (e.g. transactions)
-    drop_cols = set(stocks_data.columns) - {
-        "window_start", "ticker", "open", "high", "low", "close", "volume"
-    }
-    stocks_data.drop(columns=list(drop_cols), inplace=True)
+        # ------------------------------------------------------------
+        # 1. Load Data
+        # ------------------------------------------------------------
+        stocks_data = pd.read_parquet(stocks_file).reset_index()
 
-    # Calculate price_volume for ranking the top stocks
-    stocks_data["price_volume"] = stocks_data["close"] * stocks_data["volume"]
-    total_price_volume = stocks_data.groupby("ticker")["price_volume"].sum()
-    top_stocks = total_price_volume.nlargest(TOP_STOCKS).index
-    stocks_data = stocks_data[stocks_data["ticker"].isin(top_stocks)]
-
-    # Create a complete range of trading minutes
-    full_minutes = pd.date_range(
-        start=stocks_data["window_start"].min(),
-        end=stocks_data["window_start"].max(),
-        freq="min"
-    )
-    full_minutes_df = pd.DataFrame({"window_start": full_minutes})
-
-    # Merge, fill missing minutes, compute indicators for each stock
-    filled_data = []
-    for ticker, group in stocks_data.groupby("ticker"):
-        merged_group = full_minutes_df.merge(group, on="window_start", how="left")
-
-        # Forward/backward fill the core OHLC columns
-        merged_group[["open","high","low","close"]] = (
-            merged_group[["open","high","low","close"]].ffill().bfill()
+        # Convert window_start to Eastern Time and restrict to NYSE trading hours
+        stocks_data["window_start"] = (
+            pd.to_datetime(stocks_data["window_start"], utc=True)
+              .dt.tz_convert("America/New_York")
         )
-        merged_group["volume"] = merged_group["volume"].fillna(0)
-        merged_group["ticker"] = ticker
+        stocks_data = stocks_data[
+            (stocks_data["window_start"].dt.time >= pd.to_datetime(market_open).time()) &
+            (stocks_data["window_start"].dt.time <= pd.to_datetime(market_close).time())
+        ]
 
-        # Compute technical indicators
-        merged_group = compute_indicators(merged_group)
-        filled_data.append(merged_group)
+        # Keep only these core columns if they exist
+        keep_cols = {"window_start","ticker","open","high","low","close","volume"}
+        existing_cols = set(stocks_data.columns)
+        # We'll drop anything not in keep_cols, but only if it exists in the DataFrame
+        drop_cols = existing_cols - (keep_cols & existing_cols)
+        stocks_data.drop(columns=list(drop_cols), inplace=True)
 
-    # Combine all tickers back together
-    stocks_data = pd.concat(filled_data, ignore_index=True)
+        # ------------------------------------------------------------
+        # 2. (Optional) Select top N stocks if volume is present
+        # ------------------------------------------------------------
+        if top_stocks_num > 0 and "volume" in stocks_data.columns:
+            stocks_data["price_volume"] = stocks_data["close"] * stocks_data["volume"]
+            total_price_volume = stocks_data.groupby("ticker")["price_volume"].sum()
+            top_stocks = total_price_volume.nlargest(top_stocks_num).index
+            stocks_data = stocks_data[stocks_data["ticker"].isin(top_stocks)]
+        elif top_stocks_num > 0 and "volume" not in stocks_data.columns:
+            # We can't rank by volume if it doesn't exist. Print a warning and keep all.
+            print(f"Warning: 'volume' not found. Cannot select top {top_stocks_num} stocks. Keeping all tickers.")
+        # If top_stocks_num == 0, do nothing (we keep all tickers).
 
-    # Pivot (actually pivot_table for safety in case of duplicates)
-    # We'll keep these columns: open, high, low, close, volume, ema12, ema26, macd, rsi, vwap
-    # index = each minute, columns = each ticker, values = these features
-    pivoted_data = pd.pivot_table(
-        stocks_data,
-        index="window_start",
-        columns="ticker",
-        values=["open","high","low","close","volume","ema12","ema26","macd","rsi","vwap"],
-        aggfunc="first"  # if duplicates exist, take the first row
-    )
+        # ------------------------------------------------------------
+        # 3. Reindex to ensure a row for each trading minute
+        # ------------------------------------------------------------
+        if len(stocks_data) == 0:
+            print(f"No data after filtering for {date}. Skipping.")
+            continue
 
-    # Flatten the MultiIndex columns: (feature, ticker) -> "TICKER_feature"
-    pivoted_data.columns = [f"{ticker}_{feature}" for feature, ticker in pivoted_data.columns]
+        full_minutes = pd.date_range(
+            start=stocks_data["window_start"].min(),
+            end=stocks_data["window_start"].max(),
+            freq="min"
+        )
+        full_minutes_df = pd.DataFrame({"window_start": full_minutes})
 
-    # Check for NaNs
-    if pivoted_data.isna().any().any():
-        raise ValueError(f"NaNs found in final dataframe for date={date}.")
+        # ------------------------------------------------------------
+        # 4. Merge, fill missing minutes; optionally compute indicators
+        # ------------------------------------------------------------
+        filled_data = []
+        for ticker, group in stocks_data.groupby("ticker"):
+            merged_group = full_minutes_df.merge(group, on="window_start", how="left")
 
-    # Save the processed data
-    pivoted_data.to_parquet(output_file, index=True)
-    print(f"Processed and saved: {output_file}")
+            # Forward/backward fill the core OHLC columns if they exist
+            for col in ["open","high","low","close"]:
+                if col in merged_group.columns:
+                    merged_group[col] = merged_group[col].ffill().bfill()
 
-print("All files processed.")
+            # If volume column exists, fill missing with 0
+            if "volume" in merged_group.columns:
+                merged_group["volume"] = merged_group["volume"].fillna(0)
+
+            merged_group["ticker"] = ticker
+
+            # Compute indicators if not disabled
+            if not no_indicators:
+                merged_group = compute_indicators(merged_group)
+            filled_data.append(merged_group)
+
+        # Combine all tickers back together
+        stocks_data = pd.concat(filled_data, ignore_index=True)
+
+        # ------------------------------------------------------------
+        # 5. Pivot to create a wide matrix
+        # ------------------------------------------------------------
+        # Base columns for pivot
+        pivot_cols = ["open","high","low","close"]
+        if "volume" in stocks_data.columns:
+            pivot_cols.append("volume")
+
+        # If we computed indicators, add them; note that VWAP can be NA if volume didn't exist.
+        if not no_indicators:
+            pivot_cols += ["ema12","ema26","macd","rsi","vwap"]
+
+        # Restrict to the columns that actually exist in stocks_data
+        pivot_cols = [c for c in pivot_cols if c in stocks_data.columns]
+
+        pivoted_data = pd.pivot_table(
+            stocks_data,
+            index="window_start",
+            columns="ticker",
+            values=pivot_cols,
+            aggfunc="first"
+        )
+
+        # Flatten the MultiIndex columns: (feature, ticker) -> "TICKER_feature"
+        pivoted_data.columns = [f"{ticker}_{feature}" for feature, ticker in pivoted_data.columns]
+
+        # ------------------------------------------------------------
+        # 6. Final checks and save
+        # ------------------------------------------------------------
+        if pivoted_data.isna().any().any():
+            raise ValueError(f"NaNs found in final dataframe for date={date}.")
+
+        pivoted_data.to_parquet(output_file, index=True)
+        print(f"Processed and saved: {output_file}")
+
+    print("All files processed.")
+
+
+if __name__ == "__main__":
+    main()
