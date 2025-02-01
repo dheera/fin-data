@@ -4,6 +4,7 @@ import sys
 import os
 import argparse
 import pandas as pd
+import numpy as np
 from pathlib import Path
 from tqdm import tqdm
 
@@ -20,7 +21,7 @@ def parse_args():
         help="Directory to save the output .parquet files.")
 
     parser.add_argument("--no-indicators", action="store_true",
-        help="If set, do NOT compute technical indicators (ema12, ema26, macd, rsi, vwap).")
+        help="If set, do NOT compute technical indicators (ema12, ema26, macd, rsi, vwap, atv).")
 
     parser.add_argument("--top-stocks", type=int, default=1024,
         help="Number of top stocks to keep (by 'close * volume'). 0 means keep all stocks.")
@@ -33,8 +34,9 @@ def parse_args():
 def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     """
     Given a DataFrame for a single ticker, containing:
-        window_start, open, high, low, close, volume, ticker
-    compute the following columns: ema12, ema26, macd, rsi, vwap.
+        window_start, open, high, low, close, volume, transactions, ticker
+    compute the following columns: ema12, ema26, macd, rsi, vwap, atv.
+    - atv (average transaction size) = volume / transactions (0 if transactions == 0)
     """
     # Sort by time to ensure calculations are in correct chronological order
     df = df.sort_values("window_start")
@@ -62,11 +64,22 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
         cum_vol = df["volume"].cumsum()
         df["vwap"] = cum_vp / cum_vol
     else:
-        # If there's no volume, we can't compute VWAP
-        df["vwap"] = pd.NA
+        df["vwap"] = 0  # or pd.NA, but we keep 0 to avoid NaNs
 
-    # Forward/backward fill any boundary NaNs
-    df = df.ffill().bfill()
+    # --- atv (Average Transaction Size) ---
+    # If 'transactions' exists and is not zero, volume / transactions; otherwise 0
+    if "transactions" in df.columns:
+        df["atv"] = np.where(df["transactions"] != 0,
+                             df["volume"] / df["transactions"],
+                             0)
+    else:
+        df["atv"] = 0
+
+    # Forward/backward fill boundary NaNs in these columns (if any)
+    # (We prefer 0 for some items, but let's keep the prior pattern for consistency)
+    fill_cols = ["ema12","ema26","macd","rsi","vwap","atv"]
+    for col in fill_cols:
+        df[col] = df[col].ffill().bfill()
 
     return df
 
@@ -116,10 +129,9 @@ def main():
             (stocks_data["window_start"].dt.time <= pd.to_datetime(market_close).time())
         ]
 
-        # Keep only these core columns if they exist
-        keep_cols = {"window_start","ticker","open","high","low","close","volume"}
+        # Keep only these core columns if they exist (include 'transactions' now)
+        keep_cols = {"window_start","ticker","open","high","low","close","volume","transactions"}
         existing_cols = set(stocks_data.columns)
-        # We'll drop anything not in keep_cols, but only if it exists in the DataFrame
         drop_cols = existing_cols - (keep_cols & existing_cols)
         stocks_data.drop(columns=list(drop_cols), inplace=True)
 
@@ -132,9 +144,7 @@ def main():
             top_stocks = total_price_volume.nlargest(top_stocks_num).index
             stocks_data = stocks_data[stocks_data["ticker"].isin(top_stocks)]
         elif top_stocks_num > 0 and "volume" not in stocks_data.columns:
-            # We can't rank by volume if it doesn't exist. Print a warning and keep all.
             print(f"Warning: 'volume' not found. Cannot select top {top_stocks_num} stocks. Keeping all tickers.")
-        # If top_stocks_num == 0, do nothing (we keep all tickers).
 
         # ------------------------------------------------------------
         # 3. Reindex to ensure a row for each trading minute
@@ -162,15 +172,20 @@ def main():
                 if col in merged_group.columns:
                     merged_group[col] = merged_group[col].ffill().bfill()
 
-            # If volume column exists, fill missing with 0
+            # If volume exists, fill missing with 0
             if "volume" in merged_group.columns:
                 merged_group["volume"] = merged_group["volume"].fillna(0)
+
+            # If transactions exists, fill missing with 0
+            if "transactions" in merged_group.columns:
+                merged_group["transactions"] = merged_group["transactions"].fillna(0)
 
             merged_group["ticker"] = ticker
 
             # Compute indicators if not disabled
             if not no_indicators:
                 merged_group = compute_indicators(merged_group)
+
             filled_data.append(merged_group)
 
         # Combine all tickers back together
@@ -184,9 +199,13 @@ def main():
         if "volume" in stocks_data.columns:
             pivot_cols.append("volume")
 
-        # If we computed indicators, add them; note that VWAP can be NA if volume didn't exist.
+        # If we computed indicators, add them
         if not no_indicators:
-            pivot_cols += ["ema12","ema26","macd","rsi","vwap"]
+            # We'll only add these if they exist in the final DataFrame
+            indicator_cols = ["ema12","ema26","macd","rsi","vwap","atv"]
+            for col in indicator_cols:
+                if col in stocks_data.columns:
+                    pivot_cols.append(col)
 
         # Restrict to the columns that actually exist in stocks_data
         pivot_cols = [c for c in pivot_cols if c in stocks_data.columns]
@@ -200,7 +219,8 @@ def main():
         )
 
         # Flatten the MultiIndex columns: (feature, ticker) -> "TICKER_feature"
-        pivoted_data.columns = [f"{ticker}_{feature}" for feature, ticker in pivoted_data.columns]
+        pivoted_data.columns = [f"{ticker}_{feature}"
+                                for feature, ticker in pivoted_data.columns]
 
         # ------------------------------------------------------------
         # 6. Final checks and save
