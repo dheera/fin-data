@@ -1,6 +1,6 @@
 #!/bin/bash
 echo "Downloading data"
-./download_flatfiles.py
+./download_minute_aggs.py
 sleep 1
 echo "Converting to parquets: stocks"
 ./csv2parquet_minute_aggs.py us_stocks_sip/minute_aggs_v1/ us_stocks_sip/minute_aggs_parquet/
