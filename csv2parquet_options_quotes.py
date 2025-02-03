@@ -8,68 +8,82 @@ import pyarrow as pa
 from datetime import datetime
 import pytz
 import os
+import re
+import numpy as np
+
+# Precompile regex for parsing tickers
+ticker_regex = re.compile(r"O:([A-Z]+)(\d{6})([CP])(\d{8})")
 
 def parse_ticker(ticker):
-    """Extracts underlying, expiry, type, and strike price from an option ticker."""
-    parts = ticker.split(":")
-    if len(parts) != 2:
+    """Optimized function to extract underlying, expiry, type, and strike price from an option ticker."""
+    match = ticker_regex.match(ticker)
+    if not match:
         return None
-    
-    option = parts[1]
-    underlying = ''.join(filter(str.isalpha, option[:-15]))  # Extract underlying (e.g., AAPL, NVDA, etc.)
-    expiry = option[-15:-9]    # Extract expiry (e.g., 250221 for 2025-02-21)
-    opt_type = option[-9]      # Extract option type ('C' or 'P')
-    strike = int(option[-8:]) / 1000  # Convert strike price to float (e.g., 115000 -> 115.0)
-    
+    underlying, expiry, opt_type, strike = match.groups()
+    expiry = int(expiry)  # Convert expiry to int
+    strike = int(strike) / 1000  # Convert strike price to float
     return underlying, expiry, opt_type, strike
 
-def convert_timestamp(sip_timestamp):
-    """Converts nanosecond SIP timestamp to America/New_York timezone."""
-    utc_time = datetime.utcfromtimestamp(sip_timestamp / 1e9).replace(tzinfo=pytz.utc)
-    ny_time = utc_time.astimezone(pytz.timezone('America/New_York'))
-    return ny_time
+def convert_timestamp_series(sip_timestamps):
+    """Vectorized conversion of nanosecond SIP timestamps to America/New_York timezone."""
+    utc_times = pd.to_datetime(sip_timestamps, unit='ns', utc=True)
+    return utc_times.dt.tz_convert('America/New_York')
 
 def process_file(input_filename):
     """Reads a gzipped CSV in a streaming fashion and writes Parquet files by underlying."""
     current_underlying = None
-    data = []
+    chunk_size = 500000  # Preallocated chunk size
+    chunks = []
+    current_size = 0
+    
+    dtype_mapping = np.dtype([
+        ('expiry', np.int32), ('type', 'U1'), ('strike', np.float32), ('sip_timestamp', np.int64),
+        ('ask_exchange', np.int16), ('ask_price', np.float32), ('ask_size', np.int32),
+        ('bid_exchange', np.int16), ('bid_price', np.float32), ('bid_size', np.int32)
+    ])
     
     with gzip.open(input_filename, 'rt') as f:
         reader = csv.DictReader(f)
+        buffer = np.zeros(chunk_size, dtype=dtype_mapping)  # Preallocated structured NumPy array
         for row in reader:
             parsed = parse_ticker(row['ticker'])
             if not parsed:
                 continue
-            
             underlying, expiry, opt_type, strike = parsed
-            row['expiry'] = expiry
-            row['type'] = opt_type
-            row['strike'] = strike
-            row['sip_timestamp'] = convert_timestamp(int(row['sip_timestamp']))
-            del row['ticker']  # Drop original ticker column
-            del row['sequence_number']  # Drop sequence number column
             
             if current_underlying is None:
                 current_underlying = underlying
             
-            if underlying != current_underlying:
-                # Save the existing data for the previous underlying
-                save_parquet(data, input_filename, current_underlying)
-                data.clear()
+            if underlying != current_underlying or current_size >= chunk_size:
+                df = pd.DataFrame(buffer[:current_size])
+                chunks.append(df)
+                
+                if underlying != current_underlying:
+                    final_df = pd.concat(chunks, ignore_index=True)
+                    save_parquet(final_df, input_filename, current_underlying)
+                    chunks.clear()
+                
+                buffer = np.zeros(chunk_size, dtype=dtype_mapping)  # Reset buffer
+                current_size = 0
                 current_underlying = underlying
             
-            data.append(row)
+            buffer[current_size] = (expiry, opt_type, strike, int(row['sip_timestamp']), int(row['ask_exchange']),
+                                    float(row['ask_price']), int(row['ask_size']), int(row['bid_exchange']), 
+                                    float(row['bid_price']), int(row['bid_size']))
+            current_size += 1
         
-        if data:
-            save_parquet(data, input_filename, current_underlying)  # Save last chunk
+        if current_size > 0:
+            df = pd.DataFrame(buffer[:current_size])
+            chunks.append(df)
+            final_df = pd.concat(chunks, ignore_index=True)
+            save_parquet(final_df, input_filename, current_underlying)
 
-def save_parquet(data, input_filename, underlying):
+def save_parquet(df, input_filename, underlying):
     """Writes collected data to a Parquet file for a specific underlying."""
-    if not data:
+    if df.empty:
         return
     
-    df = pd.DataFrame(data)
-    df['sip_timestamp'] = pd.to_datetime(df['sip_timestamp'])
+    df['sip_timestamp'] = convert_timestamp_series(df['sip_timestamp'])  # Vectorized timestamp conversion
     
     date_str = os.path.basename(input_filename).split('.')[0]  # Extract date from filename
     output_filename = f"{date_str}-{underlying}.parquet"
@@ -77,7 +91,15 @@ def save_parquet(data, input_filename, underlying):
     table = pa.Table.from_pandas(df)
     pq.write_table(table, output_filename)
     print(f"Saved {output_filename}")
+    
+    del df  # Free memory after writing file
 
-# Example usage
-process_file("2025-01-31.csv.gz")
+if __name__ == "__main__":
+    for filename in sys.argv[1:]:
+        if filename.endswith(".csv.gz"):
+            print(f"Processing {filename}")
+            process_file(filename)
+        else:
+            print(f"Not a .csv.gz file, skipping: {filename}")
+
 
