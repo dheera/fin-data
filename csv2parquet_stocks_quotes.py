@@ -8,23 +8,9 @@ import pyarrow as pa
 from datetime import datetime
 import pytz
 import os
-import re
 import numpy as np
 import sys
 import argparse
-
-# Precompile regex for parsing tickers
-ticker_regex = re.compile(r"O:([A-Z]+)(\d{6})([CP])(\d{8})")
-
-def parse_ticker(ticker):
-    """Optimized function to extract underlying, expiry, type, and strike price from an option ticker."""
-    match = ticker_regex.match(ticker)
-    if not match:
-        return None
-    underlying, expiry, opt_type, strike = match.groups()
-    expiry = int(expiry)  # Convert expiry to int
-    strike = int(strike) / 1000  # Convert strike price to float
-    return underlying, expiry, opt_type, strike
 
 def convert_timestamp_series(sip_timestamps):
     """Vectorized conversion of nanosecond SIP timestamps to America/New_York timezone."""
@@ -32,14 +18,14 @@ def convert_timestamp_series(sip_timestamps):
     return utc_times.dt.tz_convert('America/New_York')
 
 def process_file(input_filename, output_dir):
-    """Reads a gzipped CSV in a streaming fashion and writes Parquet files by underlying."""
-    current_underlying = None
+    """Reads a gzipped CSV in a streaming fashion and writes Parquet files by ticker."""
+    current_ticker = None
     chunk_size = 500000  # Preallocated chunk size
     chunks = []
     current_size = 0
     
     dtype_mapping = np.dtype([
-        ('expiry', np.int32), ('type', 'U1'), ('strike', np.float32), ('sip_timestamp', np.int64),
+        ('sip_timestamp', np.int64),
         ('ask_exchange', np.int16), ('ask_price', np.float32), ('ask_size', np.int32),
         ('bid_exchange', np.int16), ('bid_price', np.float32), ('bid_size', np.int32)
     ])
@@ -48,31 +34,26 @@ def process_file(input_filename, output_dir):
         reader = csv.DictReader(f)
         buffer = np.zeros(chunk_size, dtype=dtype_mapping)  # Preallocated structured NumPy array
         for row in reader:
-            parsed = parse_ticker(row['ticker'])
-            if not parsed:
-                continue
-            underlying, expiry, opt_type, strike = parsed
+            ticker = row['ticker']
             
-            if current_underlying is None:
-                current_underlying = underlying
-            
-            if underlying != current_underlying or current_size >= chunk_size:
+            if ticker != current_ticker or current_size >= chunk_size:
                 df = pd.DataFrame(buffer[:current_size])
                 chunks.append(df)
                 
-                if underlying != current_underlying:
+                if ticker != current_ticker:
                     final_df = pd.concat(chunks, ignore_index=True)
                     final_df.sort_values(by='sip_timestamp', inplace=True)  # Sorting before saving
-                    save_parquet(final_df, input_filename, output_dir, current_underlying)
+                    save_parquet(final_df, input_filename, output_dir, current_ticker)
                     chunks.clear()
                 
                 buffer = np.zeros(chunk_size, dtype=dtype_mapping)  # Reset buffer
                 current_size = 0
-                current_underlying = underlying
+                current_ticker = ticker
             
-            buffer[current_size] = (expiry, opt_type, strike, int(row['sip_timestamp']), int(row['ask_exchange']),
+            buffer[current_size] = (int(row['sip_timestamp']), int(row['ask_exchange']),
                                     float(row['ask_price']), int(row['ask_size']), int(row['bid_exchange']), 
                                     float(row['bid_price']), int(row['bid_size']))
+
             current_size += 1
         
         if current_size > 0:
@@ -80,17 +61,17 @@ def process_file(input_filename, output_dir):
             chunks.append(df)
             final_df = pd.concat(chunks, ignore_index=True)
             final_df.sort_values(by='sip_timestamp', inplace=True)  # Sorting before saving
-            save_parquet(final_df, input_filename, output_dir, current_underlying)
+            save_parquet(final_df, input_filename, output_dir, current_ticker)
 
-def save_parquet(df, input_filename, output_dir, underlying):
-    """Writes collected data to a Parquet file for a specific underlying."""
+def save_parquet(df, input_filename, output_dir, ticker):
+    """Writes collected data to a Parquet file for a specific ticker."""
     if df.empty:
         return
     
     df['sip_timestamp'] = convert_timestamp_series(df['sip_timestamp'])  # Vectorized timestamp conversion
     
     date_str = os.path.basename(input_filename).split('.')[0]  # Extract date from filename
-    output_filename = os.path.join(output_dir, date_str, f"{date_str}-{underlying}.parquet")
+    output_filename = os.path.join(output_dir, date_str, f"{date_str}-{ticker}.parquet")
     
     os.makedirs(os.path.join(output_dir, date_str), exist_ok=True)
 
@@ -102,7 +83,7 @@ def save_parquet(df, input_filename, output_dir, underlying):
 
 # Example usage
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Reindex a single day of option quotes and store it as separate Parquets per underlying.")
+    parser = argparse.ArgumentParser(description="Reindex a single day of stock quotes and store it as separate Parquets per ticker.")
     parser.add_argument("in_file", type=str, help="Path to input CSV.gz file.")
     parser.add_argument("out_dir", type=str, help="Path to the directory to store Parquet files.")
     args = parser.parse_args()
