@@ -9,7 +9,6 @@ echo "Converting to parquets: options"
 echo "Converting to parquets: indexes"
 ./csv2parquet_minute_aggs.py us_indices/minute_aggs_v1/ us_indices/minute_aggs_parquet/
 sleep 1
-echo "Stock matrix"
-./gen_matrix.py us_stocks_sip/minute_aggs_parquet/ us_stocks_sip/minute_aggs_matrix/
-#./gen_matrix.py us_options_opra/minute_aggs_parquet/ us_options_opra/minute_aggs_matrix/ --top-stocks 0 --no-indicators
+echo "Matrix"
+./gen_matrix.py us_stocks_sip/minute_aggs_parquet/ us_stocks_sip/minute_aggs_matrix/ --top-stocks 1024
 ./gen_matrix.py us_indices/minute_aggs_parquet/ us_indices/minute_aggs_matrix/ --top-stocks 0 --no-indicators
