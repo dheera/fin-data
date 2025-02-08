@@ -10,6 +10,7 @@ import pytz
 import os
 import re
 import numpy as np
+import sys
 
 # Precompile regex for parsing tickers
 ticker_regex = re.compile(r"O:([A-Z]+)(\d{6})([CP])(\d{8})")
@@ -29,7 +30,7 @@ def convert_timestamp_series(sip_timestamps):
     utc_times = pd.to_datetime(sip_timestamps, unit='ns', utc=True)
     return utc_times.dt.tz_convert('America/New_York')
 
-def process_file(input_filename):
+def process_file(input_filename, output_dir):
     """Reads a gzipped CSV in a streaming fashion and writes Parquet files by underlying."""
     current_underlying = None
     chunk_size = 500000  # Preallocated chunk size
@@ -60,6 +61,7 @@ def process_file(input_filename):
                 
                 if underlying != current_underlying:
                     final_df = pd.concat(chunks, ignore_index=True)
+                    final_df.sort_values(by='sip_timestamp', inplace=True)  # Sorting before saving
                     save_parquet(final_df, input_filename, current_underlying)
                     chunks.clear()
                 
@@ -76,6 +78,7 @@ def process_file(input_filename):
             df = pd.DataFrame(buffer[:current_size])
             chunks.append(df)
             final_df = pd.concat(chunks, ignore_index=True)
+            final_df.sort_values(by='sip_timestamp', inplace=True)  # Sorting before saving
             save_parquet(final_df, input_filename, current_underlying)
 
 def save_parquet(df, input_filename, underlying):
@@ -86,20 +89,22 @@ def save_parquet(df, input_filename, underlying):
     df['sip_timestamp'] = convert_timestamp_series(df['sip_timestamp'])  # Vectorized timestamp conversion
     
     date_str = os.path.basename(input_filename).split('.')[0]  # Extract date from filename
-    output_filename = f"{date_str}-{underlying}.parquet"
+    output_filename = os.path.join(output_dir, date_str, f"{date_str}-{underlying}.parquet")
     
+    os.makedirs(os.path.join(output_dir, date_str), exist_ok=True)
+
     table = pa.Table.from_pandas(df)
     pq.write_table(table, output_filename)
     print(f"Saved {output_filename}")
     
     del df  # Free memory after writing file
 
+# Example usage
 if __name__ == "__main__":
-    for filename in sys.argv[1:]:
-        if filename.endswith(".csv.gz"):
-            print(f"Processing {filename}")
-            process_file(filename)
-        else:
-            print(f"Not a .csv.gz file, skipping: {filename}")
+    parser = argparse.ArgumentParser(description="Reindex a single day of option quotes and store it as separate Parquets per underlying.")
+    parser.add_argument("in_file", type=str, help="Path to input CSV.gz file.")
+    parser.add_argument("out_dir", type=str, help="Path to the directory to store Parquet files.")
+    args = parser.parse_args()
 
+    process_file(args.in_file, args.out_dir)
 
