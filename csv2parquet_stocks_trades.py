@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
 
+from tqdm import tqdm
+from glob import glob
+import glob
 import pandas as pd
 import gzip
 import csv
@@ -105,11 +108,11 @@ if __name__ == "__main__":
 
     csv_files = sorted(glob(os.path.join(args.in_dir, "*.csv.gz")))
     for csv_file in tqdm(csv_files):
-        date_str = os.path.basename(args.csv_file).split('.')[0]  # Extract date from filename
+        date_str = os.path.basename(csv_file).split('.')[0]  # Extract date from filename
         out_dir = os.path.join(args.out_dir, date_str)
         if os.path.exists(out_dir) and len(os.listdir(out_dir)) > 9000:
             print(f"output dir {out_dir} already exists, skipping")
             continue
-        print(f"processing {args.infile}")
-        process_file(args.in_file, args.out_dir)
+        print(f"processing {csv_file}")
+        process_file(csv_file, args.out_dir)
 
