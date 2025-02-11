@@ -97,9 +97,19 @@ def save_parquet(df, input_filename, output_dir, ticker):
 # Example usage
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Reindex a single day of stock trades and store it as separate Parquets per ticker.")
-    parser.add_argument("in_file", type=str, help="Path to input CSV.gz file.")
+    parser.add_argument("in_dir", type=str, help="Path to dir for input CSV.gz files.")
     parser.add_argument("out_dir", type=str, help="Path to the directory to store Parquet files.")
     args = parser.parse_args()
 
-    process_file(args.in_file, args.out_dir)
+    os.makedirs(args.out_dir, exist_ok=True)
+
+    csv_files = sorted(glob(os.path.join(args.in_dir, "*.csv.gz")))
+    for csv_file in tqdm(csv_files):
+        date_str = os.path.basename(args.csv_file).split('.')[0]  # Extract date from filename
+        out_dir = os.path.join(args.out_dir, date_str)
+        if os.path.exists(out_dir) and len(os.listdir(out_dir)) > 9000:
+            print(f"output dir {out_dir} already exists, skipping")
+            continue
+        print(f"processing {args.infile}")
+        process_file(args.in_file, args.out_dir)
 
