@@ -53,14 +53,17 @@ def download(prefix, year_start = 2021, year_end = 2026):
 # - 'us_options_opra' for US options (OPRA) data
 # - 'us_stocks_sip' for US stocks (SIP) data
 
-download('us_indices/minute_aggs_v1/', year_start = 2021, year_end = 2026)
-download('us_indices/day_aggs_v1/', year_start = 2021, year_end = 2026)
+download('us_indices/minute_aggs_v1/', year_start = 2024, year_end = 2026)
+download('us_indices/day_aggs_v1/', year_start = 2024, year_end = 2026)
 
-download('us_stocks_sip/minute_aggs_v1/', year_start = 2021, year_end = 2026)
+download('us_stocks_sip/minute_aggs_v1/', year_start = 2024, year_end = 2026)
 download('us_stocks_sip/day_aggs_v1/', year_start = 2000, year_end = 2026)
-download('us_stocks_sip/quotes_v1/', year_start = 2025, year_end = 2026)
-download('us_stocks_sip/trades_v1/', year_start = 2025, year_end = 2026)
+download('us_stocks_sip/quotes_v1/', year_start = 2024, year_end = 2026)
+download('us_stocks_sip/trades_v1/', year_start = 2024, year_end = 2026)
 
-download('us_options_opra/minute_aggs_v1/', year_start = 2021, year_end = 2026)
+download('us_options_opra/minute_aggs_v1/', year_start = 2024, year_end = 2026)
 download('us_options_opra/day_aggs_v1/', year_start = 2000, year_end = 2026)
-download('us_options_opra/trades_v1/', year_start = 2025, year_end = 2026)
+# download('us_options_opra/quotes_v1/', year_start = 2024, year_end = 2026) # huge 100GB files
+download('us_options_opra/trades_v1/', year_start = 2024, year_end = 2026)
+
+

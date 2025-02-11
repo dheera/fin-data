@@ -43,6 +43,8 @@ class StockDataPreprocessor:
 
         df = pd.read_csv(file)
 
+        is_options = df.reset_index()['ticker'].iloc[0].startswith("O:")
+        
         # Convert timestamp to datetime index
         df['window_start'] = pd.to_datetime(df['window_start'], unit='ns')
         for field in ['open', 'close', 'high', 'low']:
@@ -50,7 +52,20 @@ class StockDataPreprocessor:
         for field in ['volume', 'transactions']:
             if field in df.columns:
                 df[field] = df[field].astype('int32')
-        df.set_index(['ticker', 'window_start'], inplace=True)
+
+        df["window_start"] = pd.to_datetime(df["window_start"], utc=True).dt.tz_convert("America/New_York")
+
+        if is_options:
+            df.reset_index(inplace=True)
+            ticker_pattern = r"O:(?P<underlying>.+?)(?P<expiry>\d{6})(?P<type>[CP])(?P<strike>\d{8})"
+            df[['underlying', 'expiry', 'type', 'strike']] = df['ticker'].str.extract(ticker_pattern)
+
+            # Convert extracted columns to correct types
+            df['expiry'] = df['expiry'].astype(int)
+            df['strike'] = df['strike'].astype(int) / 1000  # Convert strike to float
+            df.set_index(["underlying", "ticker", "window_start"], inplace=True)
+        else:
+            df.set_index(['ticker', 'window_start'], inplace=True)
 
         pq.write_table(pa.Table.from_pandas(df), date_path)
 
