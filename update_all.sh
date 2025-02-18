@@ -19,10 +19,13 @@ echo "*** converting: indexes day aggs"
 
 sleep 1
 
-echo "*** converting stocks/quotes"
-./csv2parquet_stocks_quotes.py us_stocks_sip/trades_v1 us_stocks_sip/quotes
+#echo "*** converting stocks/quotes"
+#./csv2parquet_stocks_quotes.py us_stocks_sip/quotes_v1 us_stocks_sip/quotes
 echo "*** converting stocks/trades"
 ./csv2parquet_stocks_trades.py us_stocks_sip/trades_v1 us_stocks_sip/trades
+
+sleep 1
+
 #echo "*** converting options/quotes"
 # ./csv2parquet_options_quotes.py us_options_opra/trades_v1 us_options_opra/quotes
 echo "*** converting options/trades"
@@ -32,6 +35,8 @@ sleep 1
 
 echo "*** generating stocks/matrix"
 ./gen_matrix.py us_stocks_sip/minute_aggs/ us_stocks_sip/minute_aggs/ --top-stocks 1024
+echo "*** generating options/matrix"
+./gen_options_matrix.py us_stocks_sip/minute_aggs/ us_stocks_sip/minute_aggs/
 echo "*** generating indices/matrix"
 ./gen_matrix.py us_indices/minute_aggs/ us_indices/minute_aggs/ --top-stocks 0 --no-indicators
 
