@@ -2,7 +2,6 @@
 
 from tqdm import tqdm
 from glob import glob
-import glob
 import pandas as pd
 import gzip
 import csv
