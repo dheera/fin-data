@@ -218,9 +218,8 @@ def main():
             aggfunc="first"
         )
 
-        # Flatten the MultiIndex columns: (feature, ticker) -> "TICKER_feature"
-        pivoted_data.columns = [f"{ticker}_{feature}"
-                                for feature, ticker in pivoted_data.columns]
+        pivoted_data.columns = pivoted_data.columns.swaplevel(0, 1)
+        pivoted_data = pivoted_data.sort_index(axis=1)
 
         # ------------------------------------------------------------
         # 6. Final checks and save
