@@ -21,6 +21,13 @@ def main():
     file_paths = glob.glob(os.path.join(args.input_dir, "*.parquet"))
 
     for file_path in file_paths:
+        out_name = os.path.basename(file_path)
+        out_path = os.path.join(args.output_dir, out_name)
+        
+        if os.path.exists(out_path):
+            print(f"{out_path} exists, skipping")
+            continue
+
         # Read the Parquet file into a DataFrame
         df = pd.read_parquet(file_path)
         df.reset_index(inplace=True)
@@ -66,8 +73,6 @@ def main():
         # --------------------------------------------------
         # 5) Write the DataFrame to Parquet
         # --------------------------------------------------
-        out_name = os.path.basename(file_path)
-        out_path = os.path.join(args.output_dir, out_name)
 
         pivoted.to_parquet(out_path)
         print(f"Processed {file_path} -> {out_path}")
