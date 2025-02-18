@@ -14,11 +14,12 @@ import pyarrow.parquet as pq
 from datetime import datetime
 from pathlib import Path
 
-class StockDataPreprocessor:
-    def __init__(self, in_dir, out_dir):
+class AggDataPreprocessor:
+    def __init__(self, in_dir, out_dir, delete_original):
         self.in_dir = Path(in_dir)
         self.out_dir = Path(out_dir)
         self.out_dir.mkdir(parents=True, exist_ok=True)
+        self.delete_original = delete_original
 
     def reindex_and_store_all(self):
         """
@@ -26,21 +27,30 @@ class StockDataPreprocessor:
         """
         files = sorted(self.in_dir.glob("*.csv.gz"))  # Sort files alphabetically
         for file in files:
-            print(f"Processing file: {file.name}")
-            self.reindex_and_store(file)
+            # skip placeholder zero-sized files (they exist to prevent re-download)
+            if os.path.getsize(file) == 0:
+                continue
 
-    def reindex_and_store(self, file):
+            print(f"Processing file: {file.name}")
+
+            out_path = self.out_dir / file.parts[-1].replace(".csv.gz", ".parquet")
+            if os.path.exists(out_path):
+                print(f"Exists, skipping: {out_path}")
+            else:
+                self.reindex_and_store(file, out_path)
+
+            if delete_original:
+                print("Deleting original {file.name}")
+                os.remove(file)
+                Path(file).touch()
+
+    def reindex_and_store(self, file, out_path):
         """
         Load a single CSV file, reindex data, and store it in Parquet format.
 
         Args:
             file (Path): Path to the CSV file.
         """
-        date_path = self.out_dir / file.parts[-1].replace(".csv.gz", ".parquet")
-        if os.path.exists(date_path):
-            print(f"Exists, skipping: {date_path}")
-            return
-
         df = pd.read_csv(file)
 
         is_options = df.reset_index()['ticker'].iloc[0].startswith("O:")
@@ -67,15 +77,17 @@ class StockDataPreprocessor:
         else:
             df.set_index(['ticker', 'window_start'], inplace=True)
 
-        pq.write_table(pa.Table.from_pandas(df), date_path)
+        pq.write_table(pa.Table.from_pandas(df), out_path)
 
 # Example Usage
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Reindex stock data and store it in Parquet format.")
     parser.add_argument("in_dir", type=str, help="Path to the directory containing CSV.gz files.")
     parser.add_argument("out_dir", type=str, help="Path to the directory to store Parquet files.")
+    parser.add_argument("--delete-original", action="store_true", help="Delete original files (default: False)")
+
     args = parser.parse_args()
 
-    preprocessor = StockDataPreprocessor(args.in_dir, args.out_dir)
+    preprocessor = AggDataPreprocessor(args.in_dir, args.out_dir, args.delete_original)
     preprocessor.reindex_and_store_all()
 
