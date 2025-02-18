@@ -64,7 +64,7 @@ def process_option_trades(input_dir, output_dir):
         df[['underlying', 'expiry', 'type', 'strike']] = df['ticker'].str.extract(ticker_pattern)
 
         # Convert extracted columns to correct types
-        df['expiry'] df['expiry'].astype(int)
+        df['expiry'] = df['expiry'].astype(int)
         df['strike'] = df['strike'].astype(int) / 1000  # Convert strike to float
 
 
