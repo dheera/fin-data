@@ -24,8 +24,8 @@ def process_option_trades(input_dir, output_dir):
         date_dir = os.path.join(output_dir, base_name)
         os.makedirs(date_dir, exist_ok=True)
 
-        if os.path.exists(output_file) and os.path.getsize(output_file) > 0:
-            print(f"output file {output_file} exists, skipping")
+        if os.path.exists(date_dir) and len(os.listdir(date_dir)) > 3000:
+            print(f"output dir {date_dir} exists, skipping")
             continue
 
         # Read CSV file
@@ -56,6 +56,7 @@ def process_option_trades(input_dir, output_dir):
         df.drop(columns=['ticker'], inplace=True)
 
         for underlying, group in df.groupby('underlying'):
+            print(f"saving {underlying}")
             output_file = os.path.join(date_dir, f"{base_name}-{underlying}.parquet")
             group.set_index(['sip_timestamp'], inplace=True)
             group.to_parquet(output_file, engine="pyarrow", compression="snappy")
