@@ -29,18 +29,14 @@ class QuoteServer:
     def get_parquet_path(self, ticker, request_date):
         """
         Given a ticker and a date (datetime.date), return the path to the parquet file.
-        If the file does not exist for that date (e.g. weekends/holidays), search backwards.
+        Unlike previous versions, this function only checks for the requested date.
         """
-        date_to_try = request_date
-        min_date = datetime.date(2000, 1, 1)  # Arbitrary lower bound
-        while date_to_try >= min_date:
-            dir_path = os.path.join(self.base_dir, date_to_try.isoformat())
-            if os.path.isdir(dir_path):
-                pattern = os.path.join(dir_path, f"{date_to_try.isoformat()}-{ticker}*.parquet")
-                files = glob.glob(pattern)
-                if files:
-                    return files[0]
-            date_to_try -= datetime.timedelta(days=1)
+        dir_path = os.path.join(self.base_dir, request_date.isoformat())
+        if os.path.isdir(dir_path):
+            pattern = os.path.join(dir_path, f"{request_date.isoformat()}-{ticker}*.parquet")
+            files = glob.glob(pattern)
+            if files:
+                return files[0]
         return None
 
     def load_parquet_file(self, file_path):
@@ -65,28 +61,14 @@ class QuoteServer:
             return df.iloc[idx].to_dict()
         return None
 
-    def process_request(self, request_data):
+    def get_quote_logic(self, ticker, timestamp_str):
         """
-        Dispatch incoming requests to the proper handler based on the 'endpoint' key.
-        By default, the endpoint "quote" is used for equity quotes.
+        This function encapsulates the entire "get quote" logic:
+          - Check if there is a parquet file for the requested date.
+          - If a file exists, load it (or get from cache) and check if the requested timestamp
+            is within trading hours (i.e. between the first and last timestamp in the file).
+          - If within trading hours, return the as-of quote; otherwise, return an error message.
         """
-        endpoint = request_data.get("endpoint", "quote")
-        if endpoint == "quote":
-            return self.handle_quote_request(request_data)
-        else:
-            return {"error": f"Unknown endpoint: {endpoint}"}
-
-    def handle_quote_request(self, request_data):
-        """
-        Handle a 'quote' request. The expected keys in request_data are:
-          - "ticker": Stock ticker symbol.
-          - "timestamp": ISO‑formatted timestamp string.
-        """
-        ticker = request_data.get("ticker")
-        timestamp_str = request_data.get("timestamp")
-        if not ticker or not timestamp_str:
-            return {"error": "Missing 'ticker' or 'timestamp' in request."}
-
         try:
             query_ts = pd.to_datetime(timestamp_str)
         except Exception as e:
@@ -95,9 +77,9 @@ class QuoteServer:
         request_date = query_ts.date()
         file_path = self.get_parquet_path(ticker, request_date)
         if not file_path:
-            return {"error": f"No data file found for ticker {ticker} on or before {request_date}"}
+            return {"error": f"No data file found for ticker {ticker} on {request_date} (outside trading hours)."}
 
-        # Use the cached DataFrame if available; otherwise load from disk.
+        # Load the DataFrame from cache or disk.
         if file_path in self.cache:
             df = self.cache[file_path]
         else:
@@ -107,9 +89,15 @@ class QuoteServer:
                 return {"error": f"Failed to load file {file_path}: {e}"}
             self.cache[file_path] = df
 
+        # Check if the query timestamp falls within the trading hours defined by the file.
+        start_ts = df.iloc[0]["sip_timestamp"]
+        end_ts = df.iloc[-1]["sip_timestamp"]
+        if query_ts < start_ts or query_ts > end_ts:
+            return {"error": f"Timestamp {timestamp_str} is outside trading hours. Trading hours for {ticker} on {request_date} are from {start_ts.isoformat()} to {end_ts.isoformat()}."}
+
         quote = self.get_quote_from_df(df, query_ts)
         if quote is None:
-            return {"error": f"No quote found before {timestamp_str} in file {file_path}"}
+            return {"error": f"No quote found before {timestamp_str} in file {file_path}."}
 
         # Convert non-serializable types to native Python types.
         for key, value in quote.items():
@@ -122,6 +110,23 @@ class QuoteServer:
 
         quote["source_file"] = file_path
         return quote
+
+    def process_request(self, request_data):
+        """
+        Dispatch incoming requests to the proper handler based on the 'endpoint' key.
+        Currently supports:
+          - "quote": equity quote requests.
+          Additional endpoints (e.g., option quotes, chains, indexes) can be added here.
+        """
+        endpoint = request_data.get("endpoint", "quote")
+        if endpoint == "quote":
+            ticker = request_data.get("ticker")
+            timestamp_str = request_data.get("timestamp")
+            if not ticker or not timestamp_str:
+                return {"error": "Missing 'ticker' or 'timestamp' in request."}
+            return self.get_quote_logic(ticker, timestamp_str)
+        else:
+            return {"error": f"Unknown endpoint: {endpoint}"}
 
     def start(self):
         """Run the server's main loop to listen for incoming requests."""
@@ -137,7 +142,7 @@ class QuoteServer:
                 self.socket.send_string(json.dumps(error_response))
 
 if __name__ == "__main__":
-    BASE_DIR = "/fin/us_stocks_sip/quotes"  # Update this path as needed
+    BASE_DIR = "/fin/us_stocks_sip/quotes"  # Update this path as needed.
     server = QuoteServer(base_dir=BASE_DIR)
     server.start()
 

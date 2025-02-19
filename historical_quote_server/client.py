@@ -50,9 +50,9 @@ if __name__ == "__main__":
     client = QuoteClient()
     # Example usage:
     ticker = "NVDA"
-    timestamp = "2024-01-02T14:35:00-05:00"  # Adjust as needed
-    quote = client.get_quote(ticker, timestamp)
-    print("Received Quote:")
-    print(json.dumps(quote, indent=4))
+    timestamp = "2024-01-02T12:00:00-05:00"  # Adjust as needed.
+    result = client.get_quote(ticker, timestamp)
+    print("Received Response:")
+    print(json.dumps(result, indent=4))
     client.close()
 
