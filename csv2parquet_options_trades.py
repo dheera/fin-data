@@ -18,7 +18,7 @@ def process_option_trades(input_dir, output_dir):
     # Use tqdm for progress tracking
     progress = tqdm(total=len(csv_files), desc="Processing Option Trade Files", unit="file")
 
-    for file in csv_files:
+    for file in sorted(csv_files, reverse=True):
         # Extract date from filename (assuming it's in YYYY-MM-DD format somewhere in the name)
         base_name = os.path.basename(file).replace(".csv.gz", "")
         date_dir = os.path.join(output_dir, base_name)
