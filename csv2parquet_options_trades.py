@@ -8,26 +8,6 @@ from glob import glob
 from tqdm import tqdm
 import pytz
 
-def parse_option_ticker(ticker):
-    """
-    Parses the option ticker format (e.g., O:A250117C00125000)
-    and extracts underlying, expiry (yymmdd), type (C/P), and strike price.
-    """
-    try:
-        # Example: O:AMC2250620C00005000
-        core = ticker.split(":")[1]  # Remove "O:" prefix
-
-        # Assume last 15 characters contain expiry, type, and strike price
-        strike = int(core[-8:]) / 1000  # Convert to float (e.g., 00125000 → 125.00)
-        opt_type = core[-9:-8]  # "C" or "P"
-        expiry = int(core[-15:-9])  # Extract 6-digit expiry (yymmdd)
-        underlying = core[:-15]  # Extract underlying (e.g., AMC2)
-
-        return underlying, expiry, opt_type, strike
-    except Exception as e:
-        print(f"Error parsing ticker: {ticker} - {e}")
-        return None, None, None, None
-
 def process_option_trades(input_dir, output_dir):
     # Ensure output directory exists
     os.makedirs(output_dir, exist_ok=True)
@@ -41,7 +21,8 @@ def process_option_trades(input_dir, output_dir):
     for file in csv_files:
         # Extract date from filename (assuming it's in YYYY-MM-DD format somewhere in the name)
         base_name = os.path.basename(file).replace(".csv.gz", "")
-        output_file = os.path.join(output_dir, f"{base_name}.parquet")
+        date_dir = os.path.join(output_dir, base_name)
+        os.makedirs(date_dir, exist_ok=True)
 
         if os.path.exists(output_file) and os.path.getsize(output_file) > 0:
             print(f"output file {output_file} exists, skipping")
@@ -74,11 +55,10 @@ def process_option_trades(input_dir, output_dir):
         # Remove original ticker column
         df.drop(columns=['ticker'], inplace=True)
 
-        # Set MultiIndex: (underlying, sip_timestamp)
-        df.set_index(['underlying', 'sip_timestamp'], inplace=True)
-
-        # Write each file's data separately
-        df.to_parquet(output_file, engine="pyarrow", compression="snappy")
+        for underlying, group in df.groupby('underlying'):
+            output_file = os.path.join(date_dir, f"{base_name}-{underlying}.parquet")
+            group.set_index(['sip_timestamp'], inplace=True)
+            group.to_parquet(output_file, engine="pyarrow", compression="snappy")
 
         # Update progress bar
         progress.update(1)

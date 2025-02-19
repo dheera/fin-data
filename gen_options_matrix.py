@@ -18,7 +18,7 @@ def main():
     os.makedirs(args.output_dir, exist_ok=True)
 
     # Get all parquet files in the input directory
-    file_paths = glob.glob(os.path.join(args.input_dir, "*.parquet"))
+    file_paths = sorted(glob.glob(os.path.join(args.input_dir, "*.parquet")), reverse=True)
 
     for file_path in file_paths:
         out_name = os.path.basename(file_path)
@@ -44,6 +44,7 @@ def main():
         # 2) Group by (window_start, underlying, type), summing all contract volumes
         # --------------------------------------------------
         grouped = df.groupby(['window_start', 'underlying', 'type'], as_index=False)['volume'].sum()
+        grouped['volume'] = grouped['volume'].fillna(0)
 
         # --------------------------------------------------
         # 3) Pivot the DataFrame so each underlying has 2 columns (calls & puts)
@@ -52,11 +53,20 @@ def main():
             index='window_start',
             columns=['underlying', 'type'],
             values='volume',
-            fill_value=0.0
+            fill_value=0
         )
 
-        # Flatten multi-index column names: ('AAPL', 'C') → "AAPL_calls", ('AAPL', 'P') → "AAPL_puts"
-        pivoted.columns = [f"{ticker}_{'calls' if option_type == 'C' else 'puts'}" for ticker, option_type in pivoted.columns]
+        # Ensure all underlyings have both 'C' and 'P' columns
+        all_underlying_types = pd.MultiIndex.from_product([top_und, ['C', 'P']], names=['underlying', 'type'])
+        
+        # Reindex to guarantee presence of all (underlying, type) pairs
+        pivoted = pivoted.reindex(columns=all_underlying_types, fill_value=0)
+        
+        # Rename columns for clarity
+        pivoted.rename(columns={'C': 'C_volume', 'P': 'P_volume'}, level=1, inplace=True)
+        
+        # Convert to int32
+        pivoted = pivoted.astype('int32')
 
         # --------------------------------------------------
         # 4) Ensure All NYSE Trading Minutes Are Present
@@ -68,7 +78,7 @@ def main():
         full_index = pd.date_range(start=f"{trading_date} 09:30:00", end=f"{trading_date} 16:00:00", freq="min", tz=pivoted.index.tz)
 
         # Reindex to ensure every minute is present, filling missing values with 0
-        pivoted = pivoted.reindex(full_index, fill_value=0.0)
+        pivoted = pivoted.reindex(full_index, fill_value=0)
 
         # --------------------------------------------------
         # 5) Write the DataFrame to Parquet

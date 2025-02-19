@@ -101,7 +101,7 @@ def main():
     stocks_files = sorted(Path(stocks_dir).glob("*.parquet"))
     stocks_dates = {f.stem for f in stocks_files}
 
-    for date in tqdm(sorted(stocks_dates), desc="Processing Files"):
+    for date in tqdm(sorted(stocks_dates, reverse=True), desc="Processing Files"):
         stocks_file = Path(stocks_dir) / f"{date}.parquet"
         output_file = Path(output_dir) / f"{date}.parquet"
 

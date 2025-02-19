@@ -39,8 +39,8 @@ class AggDataPreprocessor:
             else:
                 self.reindex_and_store(file, out_path)
 
-            if delete_original:
-                print("Deleting original {file.name}")
+            if self.delete_original:
+                print(f"Deleting original {file.name}")
                 os.remove(file)
                 Path(file).touch()
 
