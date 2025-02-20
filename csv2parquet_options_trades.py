@@ -58,7 +58,8 @@ def process_option_trades(input_dir, output_dir):
         for underlying, group in df.groupby('underlying'):
             print(f"saving {underlying}")
             output_file = os.path.join(date_dir, f"{base_name}-{underlying}.parquet")
-            group.set_index(['sip_timestamp'], inplace=True)
+            group.sort_values(by='sip_timestamp', inplace=True)  # Sorting before saving
+            group.set_index(['expiry', 'type', 'strike'], inplace=True)
             group.to_parquet(output_file, engine="pyarrow", compression="snappy")
 
         # Update progress bar

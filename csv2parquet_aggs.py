@@ -73,7 +73,7 @@ class AggDataPreprocessor:
             # Convert extracted columns to correct types
             df['expiry'] = df['expiry'].astype(int)
             df['strike'] = df['strike'].astype(int) / 1000  # Convert strike to float
-            df.set_index(["underlying", "ticker", "window_start"], inplace=True)
+            df.set_index(["underlying", "expiry", "type", "strike", "window_start"], inplace=True)
         else:
             df.set_index(['ticker', 'window_start'], inplace=True)
 

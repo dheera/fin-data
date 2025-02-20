@@ -65,7 +65,7 @@ def process_file(input_filename, output_dir):
                 if underlying != current_underlying:
                     final_df = pd.concat(chunks, ignore_index=True)
                     final_df.sort_values(by='sip_timestamp', inplace=True)  # Sorting before saving
-                    final_df.set_index(['sip_timestamp'], inplace=True)
+                    final_df.set_index(['expiry', 'type', 'strike'], inplace=True)
                     save_parquet(final_df, input_filename, output_dir, current_underlying)
                     chunks.clear()
                 
@@ -83,7 +83,7 @@ def process_file(input_filename, output_dir):
             chunks.append(df)
             final_df = pd.concat(chunks, ignore_index=True)
             final_df.sort_values(by='sip_timestamp', inplace=True)  # Sorting before saving
-            final_df.set_index(['sip_timestamp'], inplace=True)
+            final_df.set_index(['expiry', 'type', 'strike'], inplace=True)
             save_parquet(final_df, input_filename, output_dir, current_underlying)
 
 def save_parquet(df, input_filename, output_dir, underlying):
