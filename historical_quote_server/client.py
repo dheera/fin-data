@@ -28,13 +28,53 @@ class QuoteClient:
 
     def get_quote(self, ticker, timestamp):
         """
-        Request a stock quote for the given ticker and timestamp.
+        Request a stock raw quote for the given ticker and timestamp.
         :param ticker: Stock ticker symbol.
         :param timestamp: ISO‑formatted timestamp string.
         """
         request_data = {
             "endpoint": "quote",
             "ticker": ticker,
+            "timestamp": timestamp
+        }
+        return self.send_request(request_data)
+    
+    def get_index(self, ticker, timestamp):
+        """
+        Request a index raw quote for the given ticker and timestamp.
+        :param ticker: Stock ticker symbol.
+        :param timestamp: ISO‑formatted timestamp string.
+        """
+        request_data = {
+            "endpoint": "quote",
+            "ticker": ticker,
+            "timestamp": timestamp
+        }
+        return self.send_request(request_data)
+
+    def get_option_quote(self, ticker=None, underlying=None, expiry=None, option_type=None, strike=None, timestamp=None):
+        """
+        Request an option raw quote. Provide either:
+          - A ticker string starting with "O:" (e.g., "O:NVDA261218C00162000"), OR
+          - Separate parameters: underlying, expiry, option_type, strike.
+        :param timestamp: ISO‑formatted timestamp string.
+        """
+        if ticker:
+            parsed = self.parse_option_ticker(ticker)
+            if "error" in parsed:
+                return parsed
+            underlying = parsed["underlying"]
+            expiry = parsed["expiry"]
+            option_type = parsed["option_type"]
+            strike = parsed["strike"]
+        if not (underlying and expiry and option_type and strike and timestamp):
+            return {"error": "Missing parameters for option quote. Provide either a ticker or underlying, expiry, option_type, strike, and timestamp."}
+        request_data = {
+            "endpoint": "option_quote",
+            "underlying": underlying,
+            "expiry": expiry,
+            "option_type": option_type,
+            "strike": strike,
             "timestamp": timestamp
         }
         return self.send_request(request_data)
@@ -61,10 +101,36 @@ class QuoteClient:
             return {"underlying": underlying, "expiry": expiry, "option_type": option_type, "strike": strike}
         except Exception as e:
             return {"error": f"Failed to parse option ticker: {e}"}
-
-    def get_option_quote(self, ticker=None, underlying=None, expiry=None, option_type=None, strike=None, timestamp=None):
+    
+    def get_index_minute_aggregate(self, ticker, timestamp):
         """
-        Request an option quote. You can either supply:
+        Request a stock minute aggregate for the given ticker and timestamp.
+        :param ticker: Stock ticker symbol.
+        :param timestamp: ISO‑formatted timestamp string.
+        """
+        request_data = {
+            "endpoint": "index_minute_aggregate",
+            "ticker": ticker,
+            "timestamp": timestamp
+        }
+        return self.send_request(request_data)
+
+    def get_minute_aggregate(self, ticker, timestamp):
+        """
+        Request a stock minute aggregate for the given ticker and timestamp.
+        :param ticker: Stock ticker symbol.
+        :param timestamp: ISO‑formatted timestamp string.
+        """
+        request_data = {
+            "endpoint": "minute_aggregate",
+            "ticker": ticker,
+            "timestamp": timestamp
+        }
+        return self.send_request(request_data)
+
+    def get_option_minute_aggregate(self, ticker=None, underlying=None, expiry=None, option_type=None, strike=None, timestamp=None):
+        """
+        Request an option minute aggregate. Provide either:
           - A ticker string starting with "O:" (e.g., "O:NVDA261218C00162000"), OR
           - Separate parameters: underlying, expiry, option_type, strike.
         :param timestamp: ISO‑formatted timestamp string.
@@ -78,9 +144,9 @@ class QuoteClient:
             option_type = parsed["option_type"]
             strike = parsed["strike"]
         if not (underlying and expiry and option_type and strike and timestamp):
-            return {"error": "Missing parameters for option quote. Provide either a ticker or underlying, expiry, option_type, strike, and timestamp."}
+            return {"error": "Missing parameters for option minute aggregate request."}
         request_data = {
-            "endpoint": "option_quote",
+            "endpoint": "option_minute_aggregate",
             "underlying": underlying,
             "expiry": expiry,
             "option_type": option_type,
@@ -96,20 +162,29 @@ class QuoteClient:
 
 if __name__ == "__main__":
     client = QuoteClient()
-    # Test stock quote:
-    stock_result = client.get_quote("NVDA", "2024-01-02T04:00:00-05:00")
-    print("Stock Quote Result:")
-    print(json.dumps(stock_result, indent=4))
+    # Test stock raw quote:
+    #stock_result = client.get_quote("RGTI", "2024-01-02T09:45:00-05:00")
+    #print("Stock Quote Result:")
+    #print(json.dumps(stock_result, indent=4))
 
-    # Test option quote using a ticker string:
-    option_result = client.get_option_quote(ticker="O:NVDA261218C00162000", timestamp="2025-01-02T09:30:00-05:00")
-    print("Option Quote Result (ticker):")
-    print(json.dumps(option_result, indent=4))
+    # Test option raw quote using ticker string:
+    #option_result = client.get_option_quote(underlying="RGTI", expiry="250214", option_type="C", strike=15.0, timestamp="2025-01-02T09:30:00-05:00")
+    #print("Option Quote Result (ticker):")
+    #print(json.dumps(option_result, indent=4))
 
-    # Test option quote using separate parameters:
-    option_result2 = client.get_option_quote(underlying="NVDA", expiry="261218", option_type="C", strike=162.0, timestamp="2025-01-02T09:30:00-05:00")
-    print("Option Quote Result (parameters):")
-    print(json.dumps(option_result2, indent=4))
+    # Test stock minute aggregate:
+    stock_minute = client.get_minute_aggregate("RGTI", "2025-02-14T07:38:00-05:00")
+    print("Stock Minute Aggregate Result:")
+    print(json.dumps(stock_minute, indent=4))
+
+    index_minute = client.get_index_minute_aggregate("I:VIX", "2025-01-03T07:38:00-05:00")
+    print("Index Minute Aggregate Result:")
+    print(json.dumps(index_minute, indent=4))
+
+    # Test option minute aggregate using separate parameters:
+    option_minute = client.get_option_minute_aggregate(underlying="RGTI", expiry="250117", option_type="C", strike=18.0, timestamp="2025-01-02T09:31:00-05:00")
+    print("Option Minute Aggregate Result (parameters):")
+    print(json.dumps(option_minute, indent=4))
 
     client.close()
 

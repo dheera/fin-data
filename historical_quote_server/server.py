@@ -19,23 +19,38 @@ class LoggingLRUCache(LRUCache):
         return key, value
 
 class QuoteServer:
-    def __init__(self, stock_base_dir, options_base_dir, zmq_bind_address="tcp://*:5555", max_cache_bytes=20 * 1024**3):
+    def __init__(self,
+                 stock_base_dir,
+                 options_base_dir,
+                 indices_base_dir,
+                 stock_agg_base_dir,
+                 option_agg_base_dir,
+                 indices_agg_base_dir,
+                 zmq_bind_address="tcp://*:5555",
+                 max_cache_bytes=20 * 1024**3):
         """
-        :param stock_base_dir: Directory for stock parquet files.
-        :param options_base_dir: Directory for options parquet files.
+        :param stock_base_dir: Directory for stock raw quote parquet files.
+        :param options_base_dir: Directory for option raw quote parquet files.
+        :param stock_agg_base_dir: Directory for stock minute aggregate parquet files.
+        :param option_agg_base_dir: Directory for option minute aggregate parquet files.
         :param zmq_bind_address: ZeroMQ bind address.
         :param max_cache_bytes: Maximum cache size in bytes (default 20GB).
         """
         self.stock_base_dir = stock_base_dir
         self.options_base_dir = options_base_dir
+        self.indices_base_dir = indices_base_dir
+        self.stock_agg_base_dir = stock_agg_base_dir
+        self.option_agg_base_dir = option_agg_base_dir
+        self.indices_agg_base_dir = indices_agg_base_dir
         self.cache = LoggingLRUCache(maxsize=max_cache_bytes, getsizeof=dataframe_size)
         self.context = zmq.Context()
         self.socket = self.context.socket(zmq.REP)
         self.socket.bind(zmq_bind_address)
         print(f"QuoteServer bound to {zmq_bind_address}")
 
+    # ----- File lookup methods for raw quotes -----
     def get_stock_parquet_path(self, ticker, request_date):
-        """Return the stock parquet file for a given ticker and date."""
+        """Return the stock raw quote parquet file for a given ticker and date."""
         dir_path = os.path.join(self.stock_base_dir, request_date.isoformat())
         if os.path.isdir(dir_path):
             pattern = os.path.join(dir_path, f"{request_date.isoformat()}-{ticker}*.parquet")
@@ -45,7 +60,7 @@ class QuoteServer:
         return None
 
     def get_option_parquet_path(self, underlying, request_date):
-        """Return the options parquet file for a given underlying and date."""
+        """Return the option raw quote parquet file for a given underlying and date."""
         dir_path = os.path.join(self.options_base_dir, request_date.isoformat())
         if os.path.isdir(dir_path):
             pattern = os.path.join(dir_path, f"{request_date.isoformat()}-{underlying}*.parquet")
@@ -54,30 +69,59 @@ class QuoteServer:
                 return files[0]
         return None
 
+    # ----- File lookup methods for minute aggregates -----
+    def get_index_minute_agg_path(self, request_date):
+        """
+        Return the index minute aggregate file for a given ticker and date.
+        Assumes files are stored under self.stock_agg_base_dir with a filename pattern:
+        {date}-{ticker}*.parquet
+        """
+        file_path = os.path.join(self.indices_agg_base_dir, f"{request_date.isoformat()}.parquet")
+        if os.path.exists(file_path):
+            return file_path
+        return None
+
+    def get_stock_minute_agg_path(self, request_date):
+        """
+        Return the stock minute aggregate file for a given ticker and date.
+        Assumes files are stored under self.stock_agg_base_dir with a filename pattern:
+        {date}-{ticker}*.parquet
+        """
+        file_path = os.path.join(self.stock_agg_base_dir, f"{request_date.isoformat()}.parquet")
+        if os.path.exists(file_path):
+            return file_path
+        return None
+
+    def get_option_minute_agg_path(self, request_date):
+        """
+        Return the option minute aggregate file for a given underlying and date.
+        Assumes files are stored under self.option_agg_base_dir with a filename pattern:
+        {date}-{underlying}*.parquet
+        """
+        file_path = os.path.join(self.option_agg_base_dir, f"{request_date.isoformat()}.parquet")
+        if os.path.exists(file_path):
+            return file_path
+        return None
+
     def load_parquet_file(self, file_path):
-        """Load a parquet file into a DataFrame. Assumes the file is already sorted by sip_timestamp."""
+        """Load a parquet file into a DataFrame. Assumes the file is already sorted by time."""
         print(f"DEBUG: Loading file: {file_path}")
         df = pd.read_parquet(file_path)
-        if "sip_timestamp" not in df.columns:
-            raise ValueError(f"'sip_timestamp' column not found in {file_path}")
-        # Since parquets are assumed sorted, we don't convert or re-sort.
+        #if "sip_timestamp" not in df.columns:
+        #    raise ValueError(f"'sip_timestamp' column not found in {file_path}")
+        # For raw quotes, we assume the file is already sorted.
         return df
 
     def get_quote_from_df(self, df, query_timestamp):
-        """Return the as‑of quote from a sorted DataFrame given the query timestamp."""
+        """Return the as‑of row from a sorted DataFrame given the query timestamp."""
         query_ts = pd.to_datetime(query_timestamp)
         idx = df["sip_timestamp"].searchsorted(query_ts, side="right") - 1
         if idx >= 0:
             return df.iloc[idx].to_dict()
         return None
 
+    # ----- Stock raw quote logic -----
     def get_stock_quote_logic(self, ticker, timestamp_str):
-        """
-        Process a stock quote request:
-          - Loads the corresponding parquet file (or retrieves it from cache).
-          - Checks that the query timestamp falls within trading hours.
-          - Returns the as‑of quote.
-        """
         try:
             query_ts = pd.to_datetime(timestamp_str)
         except Exception as e:
@@ -116,14 +160,8 @@ class QuoteServer:
         quote["source_file"] = file_path
         return quote
 
+    # ----- Option raw quote logic -----
     def get_option_quote_logic(self, underlying, expiry, option_type, strike, timestamp_str):
-        """
-        Process an option quote request:
-          - Loads the corresponding options parquet file.
-          - Uses the multi-index (expiry, type, strike) to select the appropriate rows.
-          - Checks that the query timestamp falls within trading hours.
-          - Returns the as‑of quote.
-        """
         try:
             query_ts = pd.to_datetime(timestamp_str)
         except Exception as e:
@@ -143,10 +181,9 @@ class QuoteServer:
                 return {"error": f"Failed to load file {file_path}: {e}"}
             self.cache[file_path] = df
 
-        # Use the multi-index (expiry, type, strike) to filter rows.
         try:
+            # Use the multi-index (expiry, type, strike) to filter rows.
             df_filtered = df.loc[int(expiry), str(option_type), float(strike)]
-            # If a single row is returned as a Series, convert it to a DataFrame.
             if isinstance(df_filtered, pd.Series):
                 df_filtered = df_filtered.to_frame().T
         except KeyError:
@@ -173,7 +210,159 @@ class QuoteServer:
                 quote[key] = value.item()
         quote["source_file"] = file_path
         return quote
+    
+    # ----- Stock minute aggregate logic -----
+    def get_index_minute_aggregate_logic(self, ticker, timestamp_str):
+        """
+        Process a stock minute aggregate request:
+          - Loads the appropriate minute aggregate file (or retrieves it from cache).
+          - Filters to the given ticker (from the multi-index: ticker, window_start).
+          - Returns the as-of aggregate row (the last row with window_start <= query timestamp).
+        """
+        try:
+            query_ts = pd.to_datetime(timestamp_str)
+        except Exception as e:
+            return {"error": f"Invalid timestamp format: {e}"}
+        request_date = query_ts.date()
+        file_path = self.get_index_minute_agg_path(request_date)
+        if not file_path:
+            return {"error": f"No index minute aggregate data file found for ticker {ticker} on {request_date}."}
+        if file_path in self.cache:
+            df = self.cache[file_path]
+        else:
+            try:
+                df = self.load_parquet_file(file_path)
+            except Exception as e:
+                return {"error": f"Failed to load file {file_path}: {e}"}
+            self.cache[file_path] = df
 
+        global_times = df.index.get_level_values(1)
+        global_min = global_times.min()
+        global_max = global_times.max()
+        if query_ts < global_min or query_ts > global_max:
+            return {"error": f"Timestamp {timestamp_str} is outside trading minutes. Aggregates available from {global_min.isoformat()} to {global_max.isoformat()}."}
+
+        try:
+            # Extract rows for the given ticker.
+            df_ticker = df.loc[ticker]
+            if not isinstance(df_ticker.index, pd.DatetimeIndex):
+                df_ticker.index = pd.to_datetime(df_ticker.index, errors="coerce")
+        except KeyError:
+            return {"error": f"No minute aggregate data found for ticker {ticker} on {request_date}."}
+        pos = df_ticker.index.searchsorted(query_ts, side="right") - 1
+        if pos < 0:
+            pos = 0
+        elif pos >= len(df_ticker):
+            pos = len(df_ticker) - 1
+        row = df_ticker.iloc[pos].to_dict()
+        row["window_start"] = df_ticker.index[pos].isoformat()
+        row["source_file"] = file_path
+        return row
+
+    # ----- Stock minute aggregate logic -----
+    def get_stock_minute_aggregate_logic(self, ticker, timestamp_str):
+        """
+        Process a stock minute aggregate request:
+          - Loads the appropriate minute aggregate file (or retrieves it from cache).
+          - Filters to the given ticker (from the multi-index: ticker, window_start).
+          - Returns the as-of aggregate row (the last row with window_start <= query timestamp).
+        """
+        try:
+            query_ts = pd.to_datetime(timestamp_str)
+        except Exception as e:
+            return {"error": f"Invalid timestamp format: {e}"}
+        request_date = query_ts.date()
+        file_path = self.get_stock_minute_agg_path(request_date)
+        if not file_path:
+            return {"error": f"No stock minute aggregate data file found for ticker {ticker} on {request_date}."}
+        if file_path in self.cache:
+            df = self.cache[file_path]
+        else:
+            try:
+                df = self.load_parquet_file(file_path)
+            except Exception as e:
+                return {"error": f"Failed to load file {file_path}: {e}"}
+            self.cache[file_path] = df
+
+        global_times = df.index.get_level_values(1)
+        global_min = global_times.min()
+        global_max = global_times.max()
+        if query_ts < global_min or query_ts > global_max:
+            return {"error": f"Timestamp {timestamp_str} is outside trading minutes. Aggregates available from {global_min.isoformat()} to {global_max.isoformat()}."}
+
+        try:
+            # Extract rows for the given ticker.
+            df_ticker = df.loc[ticker]
+            if not isinstance(df_ticker.index, pd.DatetimeIndex):
+                df_ticker.index = pd.to_datetime(df_ticker.index, errors="coerce")
+        except KeyError:
+            return {"error": f"No minute aggregate data found for ticker {ticker} on {request_date}."}
+        pos = df_ticker.index.searchsorted(query_ts, side="right") - 1
+        if pos < 0:
+            pos = 0
+        elif pos >= len(df_ticker):
+            pos = len(df_ticker) - 1
+        row = df_ticker.iloc[pos].to_dict()
+        row["window_start"] = df_ticker.index[pos].isoformat()
+        row["source_file"] = file_path
+        return row
+
+    # ----- Option minute aggregate logic -----
+    def get_option_minute_aggregate_logic(self, underlying, expiry, option_type, strike, timestamp_str):
+        """
+        Process an option minute aggregate request:
+          - Loads the appropriate minute aggregate file (or retrieves it from cache).
+          - Uses the multi-index (underlying, expiry, option_type, strike, window_start) to filter rows.
+          - Returns the as-of aggregate row.
+        """
+        try:
+            query_ts = pd.to_datetime(timestamp_str)
+        except Exception as e:
+            return {"error": f"Invalid timestamp format: {e}"}
+        request_date = query_ts.date()
+        file_path = self.get_option_minute_agg_path(request_date)
+        if not file_path:
+            return {"error": f"No option minute aggregate data file found for underlying {underlying} on {request_date}."}
+        if file_path in self.cache:
+            df = self.cache[file_path]
+        else:
+            try:
+                df = self.load_parquet_file(file_path)
+            except Exception as e:
+                return {"error": f"Failed to load file {file_path}: {e}"}
+            self.cache[file_path] = df
+
+        global_times = df.index.get_level_values(4)
+        global_min = global_times.min()
+        global_max = global_times.max()
+
+        if query_ts < global_min or query_ts > global_max:
+            return {"error": f"Timestamp {timestamp_str} is outside trading minutes. Aggregates available from {global_min.isoformat()} to {global_max.isoformat()}."}
+
+        try:
+            # Filter the multi-index for the specific option contract.
+            df_option = df.loc[(str(underlying), int(expiry), str(option_type), float(strike))]
+            if isinstance(df_option, pd.Series):
+                df_option = df_option.to_frame().T
+            if not isinstance(df_option.index, pd.DatetimeIndex):
+                df_option.index = pd.to_datetime(df_option.index, errors="coerce")
+        except KeyError:
+            return {"error": f"No option minute aggregate data found for {underlying} {expiry} {option_type} {strike} on {request_date}."}
+        if df_option.empty:
+            return {"error": f"No option minute aggregate data found for {underlying} {expiry} {option_type} {strike} on {request_date}."}
+        #if query_ts < df_option.index[0] or query_ts > df_option.index[-1]:
+        #    return {"error": f"Timestamp {timestamp_str} is outside trading minutes for option {underlying} {expiry} {option_type} {strike} on {request_date}. Aggregates available from {df_option.index[0].isoformat()} to {df_option.index[-1].isoformat()}."}
+        pos = df_option.index.searchsorted(query_ts, side="right") - 1
+        if pos < 0:
+            pos = 0 # return {"error": f"No option minute aggregate available before {timestamp_str}."}
+        elif pos >= len(df_option):
+            pos = len(df_option) - 1
+        row = df_option.iloc[pos].to_dict()
+        row["window_start"] = df_option.index[pos].isoformat()
+        row["source_file"] = file_path
+        return row
+
+    # ----- Option ticker parser (for raw and minute aggregate endpoints) -----
     def parse_option_ticker(self, ticker_str):
         """
         Parse a standard options ticker string, e.g., "O:NVDA261218C00162000".
@@ -202,11 +391,15 @@ class QuoteServer:
         except Exception as e:
             return {"error": f"Failed to parse option ticker: {e}"}
 
+    # ----- Request dispatch -----
     def process_request(self, request_data):
         """
         Dispatch incoming requests by endpoint.
-          - "quote": stock quote.
-          - "option_quote": option quote.
+          - "quote": stock raw quote.
+          - "option_quote": option raw quote.
+          - "minute_aggregate": stock minute aggregate.
+          - "index_minute_aggregate": stock index aggregate.
+          - "option_minute_aggregate": option minute aggregate.
         """
         endpoint = request_data.get("endpoint", "quote")
         if endpoint == "quote":
@@ -233,6 +426,36 @@ class QuoteServer:
             if not (underlying and expiry and option_type and strike and timestamp_str):
                 return {"error": "Missing parameters in option quote request. Required: underlying, expiry, option_type, strike, timestamp."}
             return self.get_option_quote_logic(underlying, expiry, option_type, strike, timestamp_str)
+        elif endpoint == "minute_aggregate":
+            ticker = request_data.get("ticker")
+            timestamp_str = request_data.get("timestamp")
+            if not ticker or not timestamp_str:
+                return {"error": "Missing 'ticker' or 'timestamp' in minute aggregate request."}
+            return self.get_stock_minute_aggregate_logic(ticker, timestamp_str)
+        elif endpoint == "index_minute_aggregate":
+            ticker = request_data.get("ticker")
+            timestamp_str = request_data.get("timestamp")
+            if not ticker or not timestamp_str:
+                return {"error": "Missing 'ticker' or 'timestamp' in minute aggregate request."}
+            return self.get_index_minute_aggregate_logic(ticker, timestamp_str)
+        elif endpoint == "option_minute_aggregate":
+            if "ticker" in request_data and str(request_data["ticker"]).startswith("O:"):
+                parsed = self.parse_option_ticker(request_data["ticker"])
+                if "error" in parsed:
+                    return parsed
+                underlying = parsed["underlying"]
+                expiry = parsed["expiry"]
+                option_type = parsed["option_type"]
+                strike = parsed["strike"]
+            else:
+                underlying = request_data.get("underlying")
+                expiry = request_data.get("expiry")
+                option_type = request_data.get("option_type")
+                strike = request_data.get("strike")
+            timestamp_str = request_data.get("timestamp")
+            if not (underlying and expiry and option_type and strike and timestamp_str):
+                return {"error": "Missing parameters in option minute aggregate request. Required: underlying, expiry, option_type, strike, timestamp."}
+            return self.get_option_minute_aggregate_logic(underlying, expiry, option_type, strike, timestamp_str)
         else:
             return {"error": f"Unknown endpoint: {endpoint}"}
 
@@ -253,6 +476,15 @@ if __name__ == "__main__":
     # Update these paths as needed.
     stock_base_dir = "/fin/us_stocks_sip/quotes"
     options_base_dir = "/fin/us_options_opra/quotes"
-    server = QuoteServer(stock_base_dir=stock_base_dir, options_base_dir=options_base_dir)
+    indices_base_dir = "/fin/us_indices/values"
+    stock_agg_base_dir = "/fin/us_stocks_sip/minute_aggs"
+    option_agg_base_dir = "/fin/us_options_opra/minute_aggs"
+    indices_agg_base_dir = "/fin/us_indices/minute_aggs"
+    server = QuoteServer(stock_base_dir=stock_base_dir,
+                         options_base_dir=options_base_dir,
+                         indices_base_dir=indices_base_dir,
+                         stock_agg_base_dir=stock_agg_base_dir,
+                         option_agg_base_dir=option_agg_base_dir,
+                         indices_agg_base_dir=indices_agg_base_dir)
     server.start()
 
