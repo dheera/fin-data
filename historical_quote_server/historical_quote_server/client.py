@@ -160,6 +160,16 @@ class QuoteClient:
         }
         return self.send_request(request_data)
 
+    def option_chain(self, underlying=None, timestamp=None):
+        if not (underlying and timestamp):
+            return {"error": "Missing parameters for option chain request."}
+        request_data = {
+            "endpoint": "option_chain",
+            "underlying": underlying,
+            "timestamp": timestamp
+        }
+        return self.send_request(request_data)
+
     def close(self):
         """Cleanly close the socket and context."""
         self.socket.close()

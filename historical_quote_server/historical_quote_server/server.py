@@ -356,6 +356,36 @@ class QuoteServer:
         row["source_file"] = file_path
         return row
 
+    def get_option_chain_logic(self, underlying, timestamp_str):
+        """
+        Returns the option chain of expiries, types, strikes, e.g.
+            [(250221, 'C', 0.5), (250221, 'C', 21.0), (250221, 'C', 24.0), (250221, 'C', 25.0), (250221, 'C', 26.0), ...]
+        """
+        try:
+            query_ts = pd.to_datetime(timestamp_str)
+        except Exception as e:
+            return {"error": f"Invalid timestamp format: {e}"}
+        request_date = query_ts.date()
+        file_path = self.get_option_minute_agg_path(request_date)
+        if not file_path:
+            return {"error": f"No stock minute agg data file found for ticker {ticker} on {request_date}."}
+        if file_path in self.cache:
+            df = self.cache[file_path]
+        else:
+            try:
+                df = self.load_parquet_file(file_path)
+            except Exception as e:
+                return {"error": f"Failed to load file {file_path}: {e}"}
+            self.cache[file_path] = df
+
+        try:
+            # Extract rows for the given ticker.
+            df_underlying = df.loc[underlying]
+        except KeyError:
+            return {"error": f"No minute agg data found for ticker {ticker} on {request_date}."}
+        results = list(df_underlying.droplevel('window_start').index.unique())
+        return results
+
     # ----- Option ticker parser (for raw and minute agg endpoints) -----
     def parse_option_ticker(self, ticker_str):
         """
@@ -450,6 +480,13 @@ class QuoteServer:
             if not (underlying and expiry and option_type and strike and timestamp_str):
                 return {"error": "Missing parameters in option minute agg request. Required: underlying, expiry, option_type, strike, timestamp."}
             return self.get_option_minute_agg_logic(underlying, expiry, option_type, strike, timestamp_str)
+        elif endpoint == "option_chain":
+            underlying = request_data.get("underlying")
+            timestamp_str = request_data.get("timestamp")
+            if not (underlying and timestamp_str):
+                return {"error": "Missing parameters in option chain request. Required: underlying, timestamp."}
+            return self.get_option_chain_logic(underlying, timestamp_str)
+
         else:
             return {"error": f"Unknown endpoint: {endpoint}"}
 
