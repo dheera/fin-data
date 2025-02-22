@@ -4,6 +4,7 @@ from tqdm import tqdm
 from glob import glob
 import pandas as pd
 import gzip
+from pathlib import Path
 import csv
 import pyarrow.parquet as pq
 import pyarrow as pa
@@ -101,16 +102,24 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Reindex a single day of stock trades and store it as separate Parquets per ticker.")
     parser.add_argument("in_dir", type=str, help="Path to dir for input CSV.gz files.")
     parser.add_argument("out_dir", type=str, help="Path to the directory to store Parquet files.")
+    parser.add_argument("--delete-original", action="store_true", help="Delete original files (default: False)")
     args = parser.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
 
     csv_files = sorted(glob(os.path.join(args.in_dir, "*.csv.gz")))
     for csv_file in tqdm(csv_files):
+        if os.path.getsize(csv_file) == 0:
+            print("{csv_file} already 0, skipping")
+            continue
         date_str = os.path.basename(csv_file).split('.')[0]  # Extract date from filename
         out_dir = os.path.join(args.out_dir, date_str)
         if os.path.exists(out_dir) and len(os.listdir(out_dir)) > 9000:
             print(f"output dir {out_dir} already exists, skipping")
+            if args.delete_original:
+                print(f"Deleting original {csv_file}")
+                os.remove(csv_file)
+                Path(csv_file).touch()
             continue
         print(f"processing {csv_file}")
         process_file(csv_file, args.out_dir)
