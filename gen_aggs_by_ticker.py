@@ -70,7 +70,8 @@ def process_parquets(input_dir, output_dir, batch_size=16):
             # Convert extracted columns to correct types
             df['expiry'] = df['expiry'].astype(int)
             df['strike'] = df['strike'].astype(int) / 1000  # Convert strike to float
-            df.set_index(["underlying", "window_start"], inplace=True)
+            # df.set_index(["underlying", "window_start"], inplace=True)
+            df.set_index(['underlying', 'expiry', 'type', 'strike', 'window_start'], inplace=True)
 
         # Process each ticker separately
         for ticker, group in df.groupby(level=0):  # Assuming ticker is in index
