@@ -5,7 +5,7 @@ import os
 import pandas as pd
 
 # Step 1: Read all parquet files from the splits directory
-files = glob.glob("us_stocks_sip/splits/*.parquet")
+files = glob.glob("us_stocks_sip/splits_by_ticker/*.parquet")
 dfs = [pd.read_parquet(file) for file in files]
 df = pd.concat(dfs, ignore_index=True)
 
