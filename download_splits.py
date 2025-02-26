@@ -19,10 +19,10 @@ def get_splits(ticker):
     )
     splits = r.json()['results']
     print(splits)
-    pd.DataFrame(splits).to_parquet(os.path.join("us_stocks_sip", "splits", f"{ticker}.parquet"))
+    pd.DataFrame(splits).to_parquet(os.path.join("us_stocks_sip", "splits_by_ticker", f"{ticker}.parquet"))
 
 if __name__ == "__main__":
-    os.makedirs("us_stocks_sip/splits", exist_ok = True)
+    os.makedirs("us_stocks_sip/splits_by_ticker", exist_ok = True)
     tickers = pd.read_parquet("us_stocks_sip/tickers.parquet")["ticker"].to_list()
     for ticker in tickers:
         get_splits(ticker)
