@@ -1,0 +1,8 @@
+setup.py
+historical_quote_server/__init__.py
+historical_quote_server/client.py
+historical_quote_server/server.py
+historical_quote_server.egg-info/PKG-INFO
+historical_quote_server.egg-info/SOURCES.txt
+historical_quote_server.egg-info/dependency_links.txt
+historical_quote_server.egg-info/top_level.txt

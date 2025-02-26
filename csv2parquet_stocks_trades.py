@@ -27,6 +27,7 @@ def process_file(input_filename, output_dir):
     chunk_size = 500000  # Preallocated chunk size
     chunks = []
     current_size = 0
+    print(f"processing {input_filename}")
 
     dtype_mapping = np.dtype([
         ('sip_timestamp', np.int64),
@@ -125,10 +126,9 @@ if __name__ == "__main__":
                     os.remove(csv_file)
                     Path(csv_file).touch()
                 continue
-            print(f"processing {csv_file}")
 
             futures.append(
-                executor.submit(process_file, csv_file, args.out_dir, args.delete_original)
+                executor.submit(process_file, csv_file, args.out_dir)
             )
 
         for future in concurrent.futures.as_completed(futures):

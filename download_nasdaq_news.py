@@ -84,6 +84,12 @@ def scrape_press_releases(ticker, output_dir):
         print("Error parsing API JSON:", e)
         return
 
+    # Check if API data contains valid press releases data.
+    data_section = api_data.get("data")
+    if not data_section or not data_section.get("rows"):
+        print(f"No press releases data found for ticker {ticker}.")
+        return
+
     rows = api_data.get("data", {}).get("rows", [])
     print(f"Found {len(rows)} press releases for ticker {ticker} from API")
 

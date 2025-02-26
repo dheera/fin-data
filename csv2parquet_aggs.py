@@ -74,8 +74,10 @@ class AggDataPreprocessor:
             df['expiry'] = df['expiry'].astype(int)
             df['strike'] = df['strike'].astype(int) / 1000  # Convert strike to float
             df.set_index(["underlying", "expiry", "type", "strike", "window_start"], inplace=True)
+            df.sort_index(inplace=True)
         else:
             df.set_index(['ticker', 'window_start'], inplace=True)
+            df.sort_index(inplace=True)
 
         pq.write_table(pa.Table.from_pandas(df), out_path)
 
