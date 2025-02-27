@@ -1,59 +1,4 @@
 #!/usr/bin/env python3
-
-"""
-Unified Script to Reorganize Aggregate Parquet Files by Ticker
-
-This script processes daily aggregate files (either day or minute aggregates)
-and creates/updates per-ticker Parquet files that contain all available data
-within a specified lookback period (default: 1 year).
-
-Usage Examples:
-  For day aggregates:
-    python process_aggs.py /path/to/day_aggs /path/to/day_aggs_by_ticker --agg_type day
-
-  For minute aggregates:
-    python process_aggs.py /path/to/minute_aggs /path/to/minute_aggs_per_ticker --agg_type minute
-
-The logic is nearly identical for both cases—the minute aggregate files may have
-multiple rows per ticker per day while the day aggregate files generally have one.
-
-*** Example of input: one file per day for all tickers ***
-
-/fin :) print-parquet us_stocks_sip/day_aggs/2025-01-02.parquet
-                             volume        open       close        high         low  transactions
-ticker window_start
-A      2025-01-02 05:00:00   927400  135.210007  133.429993  135.729996  132.869995         20210
-AA     2025-01-02 05:00:00  2553338   38.165001   37.990002   39.040001   37.900002         33107
-AAA    2025-01-02 05:00:00    13720   25.129999   25.100000   25.139000   25.060101            71
-AAAU   2025-01-02 05:00:00  2130005   26.160000   26.285000   26.299999   26.149000          3266
-AACG   2025-01-02 05:00:00    17613    0.832000    0.880000    0.905400    0.820001           147
-...                             ...         ...         ...         ...         ...           ...
-ZWS    2025-01-02 05:00:00   580435   37.439999   36.900002   37.590000   36.730000         11220
-ZXIET  2025-01-02 05:00:00     2000  100.000000  100.000000  100.000000  100.000000             1
-ZYME   2025-01-02 05:00:00   517644   14.660000   14.780000   15.040000   14.420000          6304
-ZYXI   2025-01-02 05:00:00    84810    8.120000    7.810000    8.120000    7.770000          1510
-ZZZ    2025-01-02 05:00:00     3437   27.330000   27.177500   27.400000   27.070000            81
-[10870 rows x 6 columns]
-
-*** Example of output: one file per ticker for all time ***
-
-/fin :) print-parquet us_stocks_sip/day_aggs_by_ticker/NVDA.parquet
-                        volume        open       close        high         low  transactions
-window_start                                                                                
-2003-09-10 04:00:00   11480051   20.150000   19.320000   20.690001   19.160000         24116
-2003-09-11 04:00:00   21728296   19.580000   19.070000   20.150000   18.299999         48120
-2003-09-12 04:00:00    9659462   18.910000   19.350000   19.770000   18.700001         23350
-2003-09-15 04:00:00    4946863   19.510000   19.030001   19.613001   18.959999         12812
-2003-09-16 04:00:00    5171418   19.070000   19.620001   19.679001   19.070000         13435
-...                        ...         ...         ...         ...         ...           ...
-2025-02-04 05:00:00  242321420  116.959999  118.650002  121.199997  116.699997       1841195
-2025-02-05 05:00:00  260517576  121.760002  124.830002  125.000000  120.760002       1968061
-2025-02-06 05:00:00  248146032  127.419998  128.679993  128.770004  125.209999       1855949
-2025-02-07 05:00:00  226630821  129.220001  129.839996  130.369995  125.000000       1778758
-2025-02-10 05:00:00  211358778  130.089996  133.570007  135.000000  129.960007       1658255
-[5390 rows x 6 columns]
-"""
-
 import os
 import argparse
 import pandas as pd
@@ -62,6 +7,10 @@ import pyarrow.parquet as pq
 from glob import glob
 from tqdm import tqdm
 from datetime import datetime, timedelta
+import concurrent.futures
+
+# New York timezone identifier
+NY_TZ = "America/New_York"
 
 def get_recent_files(input_dir, period_days=365):
     """
@@ -76,7 +25,7 @@ def get_recent_files(input_dir, period_days=365):
         try:
             file_date = datetime.strptime(date_str, "%Y-%m-%d").date()
             files_with_date.append((file, file_date))
-        except Exception as e:
+        except Exception:
             print(f"Skipping file {file}: cannot parse date from filename.")
     if not files_with_date:
         return []
@@ -107,13 +56,86 @@ def get_latest_window_starts(output_dir):
             latest_windows[ticker] = df.index.max()
     return latest_windows
 
-def process_aggs(input_dir, output_dir, agg_type="day", period_days=365, batch_size=16):
+def read_file(file):
+    """
+    Reads a Parquet file and ensures that the DataFrame is indexed by ['ticker', 'window_start'].
+    Handles cases where the file already has window_start as the index with ticker as a column.
+    Also converts the 'window_start' timestamps to New York time.
+    """
+    try:
+        df = pd.read_parquet(file)
+        # Case 1: Already a MultiIndex with both 'ticker' and 'window_start'
+        if isinstance(df.index, pd.MultiIndex) and set(["ticker", "window_start"]).issubset(df.index.names):
+            win_vals = df.index.get_level_values("window_start")
+            if win_vals.tz is None:
+                win_vals = pd.to_datetime(win_vals).tz_localize(NY_TZ, ambiguous='infer', nonexistent='shift_forward')
+            else:
+                win_vals = win_vals.tz_convert(NY_TZ)
+            df.index = pd.MultiIndex.from_arrays(
+                [df.index.get_level_values("ticker"), win_vals],
+                names=["ticker", "window_start"]
+            )
+        else:
+            # If the index is named "window_start" and "ticker" is a column, reset it.
+            if df.index.name == "window_start" and "ticker" in df.columns:
+                df = df.reset_index()
+            # Now ensure both 'ticker' and 'window_start' are present as columns.
+            if "ticker" not in df.columns or "window_start" not in df.columns:
+                raise KeyError("Missing required columns 'ticker' and/or 'window_start'")
+            df["window_start"] = pd.to_datetime(df["window_start"])
+            if df["window_start"].dt.tz is None:
+                df["window_start"] = df["window_start"].dt.tz_localize(NY_TZ, ambiguous='infer', nonexistent='shift_forward')
+            else:
+                df["window_start"] = df["window_start"].dt.tz_convert(NY_TZ)
+            df = df.set_index(["ticker", "window_start"])
+        return df
+    except Exception as e:
+        print(f"Error reading {file}: {e}")
+        return None
+
+def process_ticker(task):
+    """
+    For a given ticker, combines new rows (if any) with an existing per-ticker Parquet file.
+    Writes the combined DataFrame back to disk using snappy compression.
+    """
+    ticker, group, output_dir, latest_window = task
+    # Remove ticker from the index so that only window_start remains
+    group = group.reset_index(level=0, drop=True)
+    # Skip rows already present (based on window_start)
+    if latest_window is not None:
+        new_group = group[group.index > latest_window]
+    else:
+        new_group = group
+
+    if new_group.empty:
+        return None
+
+    output_path = os.path.join(output_dir, f"{ticker}.parquet")
+    if os.path.exists(output_path):
+        try:
+            existing_df = pd.read_parquet(output_path)
+            combined_df = pd.concat([existing_df, new_group])
+            combined_df = combined_df[~combined_df.index.duplicated(keep="last")]
+            combined_df = combined_df.sort_index()
+        except Exception as e:
+            print(f"Error processing existing file {output_path}: {e}")
+            combined_df = new_group
+    else:
+        combined_df = new_group
+
+    table = pa.Table.from_pandas(combined_df)
+    pq.write_table(table, output_path, compression="snappy")
+    return ticker
+
+def process_aggs(input_dir, output_dir, agg_type="day", period_days=365):
     """
     Process aggregate Parquet files (day or minute) by:
       - Selecting recent files (based on period_days)
-      - Reading and concatenating them in batches
-      - Grouping by ticker and dropping the ticker column (the per-ticker files use 'window_start' as index)
-      - Appending only new rows (based on 'window_start') to each ticker's output file
+      - Reading all files concurrently into memory with a process pool (using tqdm)
+      - Converting all 'window_start' timestamps to New York time
+      - Concatenating all data and grouping by ticker, then
+      - For each ticker, appending only new rows (based on 'window_start') to each ticker's output file,
+        processing these groups concurrently.
     """
     os.makedirs(output_dir, exist_ok=True)
     recent_files = get_recent_files(input_dir, period_days=period_days)
@@ -121,68 +143,35 @@ def process_aggs(input_dir, output_dir, agg_type="day", period_days=365, batch_s
         print("No recent files found in the input directory.")
         return
 
+    print("Reading all Parquet files concurrently...")
+    with concurrent.futures.ProcessPoolExecutor() as executor:
+        dfs = list(tqdm(executor.map(read_file, recent_files),
+                        total=len(recent_files),
+                        desc="Reading Parquet Files"))
+    # Filter out any failed reads
+    dfs = [df for df in dfs if df is not None]
+    if not dfs:
+        print("No dataframes could be read.")
+        return
+
+    # Concatenate all the data and sort the MultiIndex
+    all_df = pd.concat(dfs)
+    all_df = all_df.sort_index()
+
+    # Get the latest window_start per ticker from existing output files
     latest_windows = get_latest_window_starts(output_dir)
-    progress = tqdm(total=len(recent_files), desc="Processing Aggregate Files", unit="file")
 
-    for i in range(0, len(recent_files), batch_size):
-        batch_files = recent_files[i:i+batch_size]
-        dfs = []
-        for file in batch_files:
-            try:
-                df = pd.read_parquet(file)
-                dfs.append(df)
-            except Exception as e:
-                print(f"Error reading {file}: {e}")
-        if not dfs:
-            progress.update(len(batch_files))
-            continue
+    # Prepare tasks for each ticker group
+    ticker_tasks = []
+    for ticker, group in all_df.groupby(level=0):
+        lw = latest_windows.get(ticker, None)
+        ticker_tasks.append((ticker, group, output_dir, lw))
 
-        # Concatenate the batch into one DataFrame
-        batch_df = pd.concat(dfs)
-        
-        # Ensure the DataFrame is indexed by ['ticker', 'window_start']
-        if batch_df.index.nlevels < 2:
-            # If not, assume 'ticker' and 'window_start' are columns
-            batch_df = batch_df.reset_index().set_index(["ticker", "window_start"])
-
-        # (Optional) If processing day aggregates and you need to handle options tickers,
-        # you could insert extra logic here similar to the original day aggs script.
-
-        # Group by ticker (the first index level)
-        for ticker, group in batch_df.groupby(level=0):
-            # Remove ticker from the index so that only window_start remains
-            group = group.reset_index(level=0, drop=True)
-            # Skip rows that are already present (based on window_start)
-            if ticker in latest_windows:
-                new_group = group[group.index > latest_windows[ticker]]
-            else:
-                new_group = group
-
-            if new_group.empty:
-                continue
-
-            output_path = os.path.join(output_dir, f"{ticker}.parquet")
-            if os.path.exists(output_path):
-                try:
-                    existing_df = pd.read_parquet(output_path)
-                    # Combine the existing data with the new data and remove duplicate indices
-                    combined_df = pd.concat([existing_df, new_group])
-                    combined_df = combined_df[~combined_df.index.duplicated(keep="last")]
-                    combined_df = combined_df.sort_index()
-                except Exception as e:
-                    print(f"Error processing existing file {output_path}: {e}")
-                    combined_df = new_group
-            else:
-                combined_df = new_group
-
-            # Write the combined DataFrame back to a Parquet file (using snappy compression)
-            table = pa.Table.from_pandas(combined_df)
-            pq.write_table(table, output_path, compression="snappy")
-            # Update the latest window_start for this ticker
-            latest_windows[ticker] = combined_df.index.max()
-
-        progress.update(len(batch_files))
-    progress.close()
+    print("Processing ticker groups concurrently...")
+    with concurrent.futures.ProcessPoolExecutor() as executor:
+        list(tqdm(executor.map(process_ticker, ticker_tasks),
+                  total=len(ticker_tasks),
+                  desc="Processing Ticker Groups"))
     print(f"Processing complete. Files saved to {output_dir}")
 
 if __name__ == "__main__":
@@ -197,10 +186,7 @@ if __name__ == "__main__":
                         help="Type of aggregation files to process (day or minute). Default is day.")
     parser.add_argument("--period_days", type=int, default=730,
                         help="Number of days to include (default: 730).")
-    parser.add_argument("--batch_size", type=int, default=16,
-                        help="Number of files to process in each batch (default: 16).")
     args = parser.parse_args()
 
-    process_aggs(args.input_dir, args.output_dir, agg_type=args.agg_type,
-                 period_days=args.period_days, batch_size=args.batch_size)
+    process_aggs(args.input_dir, args.output_dir, agg_type=args.agg_type, period_days=args.period_days)
 
