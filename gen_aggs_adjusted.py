@@ -1,219 +1,248 @@
 #!/usr/bin/env python3
 """
-adjust_minute_aggs.py
+adjust_aggs.py
 
-This script adjusts minute-level aggregate stock price data for splits and dividends
-in reverse order so that the most recent minute prices remain unchanged. It processes
-each ticker's minute aggregate data by merging in daily splits and dividends data,
-computing a daily cumulative reverse adjustment factor, and applying that factor to 
-each minute's prices. The original "window_start" timestamps are preserved in the output.
+This script adjusts aggregate stock price data for splits and dividends in reverse so that
+the most recent prices remain unchanged. It supports both day‐ and minute‐level data using a unified
+approach: a normalized "date" is computed from either a "date" or "window_start" column, the last row
+per day is used to compute a daily adjustment factor, and that factor is merged back onto every row for
+that day. For day aggregates, grouping by date returns the original row; for minute aggregates it collapses
+multiple rows per day.
 
-The script expects the following directory structure (relative to a base directory, e.g., "us_stocks_sip"):
+Splits (with columns "execution_date", "split_from", "split_to") and dividends (with columns
+"ex_dividend_date", "cash_amount") are merged based on the normalized date, and adjustments are computed
+using the formula:
+
+    event_factor = (1 / split_factor) * ((close - dividend) / close)
+
+A cumulative reverse product of these daily event factors is computed so that the most recent day is
+unadjusted (i.e. has a factor of 1). The computed cumulative factor is applied to adjust the price columns
+("open", "high", "low", "close").
+
+Default directory structure (relative to base directory "us_stocks_sip"):
 
     us_stocks_sip/
-        minute_aggs_by_ticker/         # Contains minute-level aggregate files (one per ticker)
-            A.parquet
-            ...
-        splits_by_ticker/              # Contains splits data per ticker
-            A.parquet
-            ...
-        dividends_by_ticker/           # Contains dividends data per ticker
-            A.parquet
-            ...
-        adjusted_minute_aggs_by_ticker/ # Output directory for adjusted minute data
+       day_aggs_by_ticker/           # Input day aggregates (one file per ticker)
+       minute_aggs_by_ticker/        # Input minute aggregates (one file per ticker)
+       splits_by_ticker/             # Splits data per ticker (columns: execution_date, split_from, split_to)
+       dividends_by_ticker/          # Dividends data per ticker (columns: ex_dividend_date, cash_amount)
+       adjusted_day_aggs_by_ticker/   # Output for adjusted day aggregates
+       adjusted_minute_aggs_by_ticker/# Output for adjusted minute aggregates
 
-Example Inputs:
-----------------
-1. Minute Aggregate File ("us_stocks_sip/minute_aggs_by_ticker/A.parquet"):
-   -------------------------------------------------------------------------------
-   | window_start                 | open    | high    | low     | close   | volume | transactions |
-   |------------------------------|---------|---------|---------|---------|--------|--------------|
-   | 2025-02-14 09:30:00-05:00     | 136.99  | 137.00  | 136.01  | 136.85  | 18340  | 190          |
-   | 2025-02-14 09:31:00-05:00     | 136.94  | 137.11  | 136.93  | 137.11  | 1275   | 43           |
-   | ...                          | ...     | ...     | ...     | ...     | ...    | ...          |
-   | 2025-02-14 15:59:00-05:00     | 136.50  | 136.70  | 136.50  | 136.65  | ...    | ...          |
+Usage Examples:
+---------------
+1. Day Aggregates:
+   Input Example (/fin :) print-parquet us_stocks_sip/day_aggs_by_ticker/TSL.parquet):
+       volume       open      close       high        low  transactions
+   window_start
+   2006-12-19 05:00:00  6552700  26.000000  20.280001  26.500000  20.200001          7485
+   2006-12-20 05:00:00  1251900  20.530001  18.900000  20.900000  18.820000          2419
+   2006-12-21 05:00:00   349600  19.100000  19.219999  19.500000  19.000000           697
+   2006-12-22 05:00:00   352100  19.400000  19.850000  20.340000  19.299999           583
+   2006-12-26 05:00:00   148800  19.950001  19.980000  20.450001  19.850000           342
+   ...                      ...        ...        ...        ...        ...           ...
+   2025-02-10 05:00:00   178330  15.360000  15.050000  15.680100  15.030000          1799
+   [3203 rows x 6 columns]
 
-2. Splits File ("us_stocks_sip/splits_by_ticker/A.parquet"):
-   ------------------------------------------------------------
-   | execution_date | split_from | split_to |
-   |----------------|------------|----------|
-   | 2025-02-14     | 1          | 2        |
-
-3. Dividends File ("us_stocks_sip/dividends_by_ticker/A.parquet"):
-   ---------------------------------------------------------------
-   | ex_dividend_date | cash_amount |
-   |------------------|-------------|
-   | 2025-02-14       | 0.50        |
-
-Processing:
------------
-- A temporary "date" column is derived from "window_start" by normalizing the timestamp.
-- The daily summary is computed by taking the last minute's close price for each day.
-- Splits and dividends data are merged based on this date.
-- A daily event factor is calculated using:
-      event_factor = (1/split_factor) * ((last_close - dividend) / last_close)
-- The cumulative reverse adjustment factor is computed (in reverse order so that the latest day is unchanged)
-  and then merged back to adjust each minute's price.
-- Adjusted price columns ("adj_open", "adj_high", "adj_low", "adj_close") are computed by multiplying 
-  the original prices with the cumulative factor.
-- The original "window_start" values remain unchanged in the output.
-
-Output:
--------
-The adjusted file is written to "us_stocks_sip/adjusted_minute_aggs_by_ticker/A.parquet" with columns:
-
-    window_start, open, high, low, close, volume, transactions, 
-    adj_open, adj_high, adj_low, adj_close
-
-Example Output (first few rows):
-----------------------------------
-   window_start                 open     high     low    close   adj_open  adj_high  adj_low  adj_close  volume  transactions
-   2025-02-14 09:30:00-05:00     136.99   137.00  136.01  136.85    <calc>    <calc>    <calc>   <calc>    18340   190
-   2025-02-14 09:31:00-05:00     136.94   137.11  136.93  137.11    <calc>    <calc>    <calc>   <calc>    1275    43
+   Output Example (/fin :) print-parquet us_stocks_sip/adjusted_day_aggs_by_ticker/TSL.parquet):
+       volume       open      close       high        low  transactions  adj_open  adj_high  adj_low  adj_close
+   window_start
+   2006-12-19 05:00:00  6552700  26.000000  20.280001  26.500000  20.200001          7485    ...       ...       ...       ...
+   2006-12-20 05:00:00  1251900  20.530001  18.900000  20.900000  18.820000          2419    ...       ...       ...       ...
    ...
+   2025-02-10 05:00:00   178330  15.360000  15.050000  15.680100  15.030000          1799    ...       ...       ...       ...
+
+2. Minute Aggregates:
+   Input Example (/fin :) print-parquet us_stocks_sip/minute_aggs_by_ticker/TSL.parquet):
+                           volume     open   close    high      low  transactions
+   window_start
+   2024-02-27 07:16:00-05:00     100   8.3900   8.390   8.390   8.3900             1
+   2024-02-27 08:00:00-05:00     336   8.3903   8.410   8.410   8.3903            12
+   2024-02-27 08:03:00-05:00     107   8.2500   8.250   8.250   8.2500             6
+   2024-02-27 08:16:00-05:00     373   8.3800   8.380   8.380   8.3800             1
+   2024-02-27 08:50:00-05:00     250   8.5000   8.500   8.500   8.5000             1
+   ...                           ...      ...     ...     ...      ...           ...
+   2025-02-26 19:01:00-05:00     500  11.7500  11.750  11.750  11.7500             4
+   2025-02-26 19:08:00-05:00    1065  11.7490  11.749  11.749  11.7490             2
+   2025-02-26 19:15:00-05:00    1000  11.7490  11.749  11.749  11.7490             1
+   2025-02-26 19:24:00-05:00    1029  11.7090  11.709  11.709  11.7090             3
+   2025-02-26 19:41:00-05:00    1000  11.6890  11.689  11.689  11.6890             1
+   [60920 rows x 6 columns]
+
+   Output Example (/fin :) print-parquet us_stocks_sip/adjusted_minute_aggs_by_ticker/TSL.parquet):
+                           volume     open   close    high      low  transactions  adj_open  adj_high  adj_low  adj_close
+   window_start
+   2024-02-27 07:16:00-05:00     100   8.3900   8.390   8.390   8.3900             1    ...       ...       ...       ...
+   2024-02-27 08:00:00-05:00     336   8.3903   8.410   8.410   8.3903            12    ...       ...       ...       ...
+   ...
+   2025-02-26 19:41:00-05:00    1000  11.6890  11.689  11.689  11.6890             1    ...       ...       ...       ...
+
+Usage:
+------
+Run the script with the desired aggregation type. For example:
+  python adjust_aggs.py --agg_type day
+or
+  python adjust_aggs.py --agg_type minute
+
+Additional options allow overriding default input/output directories and specifying the locations of splits
+and dividends data.
+
+The output files will contain the original data plus new columns:
+  adj_open, adj_high, adj_low, adj_close
+which represent the adjusted prices.
 
 Note:
 -----
-- The script relies on daily splits and dividends events, merging them based on the normalized date.
-- The adjustment is performed in reverse so that the most recent minute's prices are not altered.
-- This method ensures that intraday timestamps ("window_start") remain as originally recorded.
+- The "window_start" column is preserved if present.
+- A temporary "date" column (normalized to New York time) is used for merging and is dropped in the final output.
 """
 
 import os
 from pathlib import Path
 import pandas as pd
+import argparse
 
-def adjust_minute_aggs(minute_aggs: pd.DataFrame, splits: pd.DataFrame, dividends: pd.DataFrame) -> pd.DataFrame:
+def to_ny_normalized(series):
     """
-    Adjust minute aggregate data for splits and dividends in reverse,
-    so that the most recent minute prices remain unchanged.
-
-    Since splits and dividends are daily events, this function:
-      1. Extracts a daily date from the "window_start" timestamps (without modifying them),
-      2. Computes a daily adjustment factor using the last minute's close price per day,
-      3. Merges the daily factor back onto each minute row, and
-      4. Computes adjusted price columns ("adj_open", "adj_high", "adj_low", "adj_close").
-
-    The original "window_start" timestamps are preserved in the output.
-
-    Parameters:
-    - minute_aggs: DataFrame containing minute-level aggregate data with at least the following columns:
-          * window_start (datetime): The original timestamp of the minute data.
-          * open, high, low, close (float): Price columns.
-    - splits: DataFrame containing splits data for the ticker with columns:
-          * execution_date (datetime): The date of the split.
-          * split_from (numeric) and split_to (numeric): To compute the split ratio (split_to / split_from).
-    - dividends: DataFrame containing dividend data for the ticker with columns:
-          * ex_dividend_date (datetime): The ex-dividend date.
-          * cash_amount (float): Dividend per share.
-
-    Returns:
-    - DataFrame: The minute-level DataFrame with additional columns:
-          * adj_open, adj_high, adj_low, adj_close: Adjusted price columns.
+    Convert a datetime series to New York time, normalize to midnight, and remove timezone info.
     """
-    # Work on a copy to avoid modifying the input DataFrame.
-    df = minute_aggs.copy()
+    series = pd.to_datetime(series)
+    if series.dt.tz is None:
+        series = series.dt.tz_localize("America/New_York")
+    else:
+        series = series.dt.tz_convert("America/New_York")
+    # Normalize to midnight and then drop timezone info.
+    return series.dt.normalize().dt.tz_localize(None)
 
-    # Ensure that window_start is available as a column.
-    if df.index.name == "window_start":
-        df = df.reset_index()
-    elif "window_start" not in df.columns:
-        raise ValueError("DataFrame must have a 'window_start' column or index.")
-
-    # Create a temporary "date" column by normalizing window_start (i.e. stripping the time component).
-    df["date"] = pd.to_datetime(df["window_start"]).dt.normalize()
-
-    # Sort by date and window_start to ensure correct daily ordering.
-    df = df.sort_values(["date", "window_start"]).reset_index(drop=True)
-
-    # Compute a daily summary: use the last minute's close price per day.
-    daily_summary = df.groupby("date").agg(last_close=("close", "last")).reset_index()
-
-    # --- Process splits data ---
+def process_splits(splits: pd.DataFrame) -> pd.DataFrame:
+    """Normalize splits data: compute split_factor and convert execution_date to New York normalized date."""
     if not splits.empty:
         splits = splits.copy()
-        # Convert execution_date to a normalized date.
-        splits["date"] = pd.to_datetime(splits["execution_date"]).dt.normalize()
-        # Compute the split factor (split_to divided by split_from).
+        splits["date"] = to_ny_normalized(splits["execution_date"])
         splits["split_factor"] = splits["split_to"] / splits["split_from"]
         splits = splits[["date", "split_factor"]]
     else:
         splits = pd.DataFrame(columns=["date", "split_factor"])
-    # Merge splits into the daily summary and fill missing factors with 1.
-    daily_summary = pd.merge(daily_summary, splits, on="date", how="left")
-    daily_summary["split_factor"] = daily_summary["split_factor"].fillna(1.0)
+    return splits
 
-    # --- Process dividends data ---
+def process_dividends(dividends: pd.DataFrame) -> pd.DataFrame:
+    """Normalize dividends data: rename and convert ex_dividend_date to New York normalized date."""
     if not dividends.empty:
         dividends = dividends.copy().reset_index()
         if "ex_dividend_date" in dividends.columns:
             dividends = dividends.rename(columns={"ex_dividend_date": "date"})
         if "cash_amount" in dividends.columns:
             dividends = dividends.rename(columns={"cash_amount": "dividend"})
-        dividends["date"] = pd.to_datetime(dividends["date"]).dt.normalize()
+        dividends["date"] = to_ny_normalized(dividends["date"])
         dividends = dividends[["date", "dividend"]]
     else:
         dividends = pd.DataFrame(columns=["date", "dividend"])
-    # Merge dividends into the daily summary and fill missing dividend values with 0.
-    daily_summary = pd.merge(daily_summary, dividends, on="date", how="left")
-    daily_summary["dividend"] = daily_summary["dividend"].fillna(0.0)
+    return dividends
 
-    # --- Compute the daily event factor ---
+def compute_daily_cum_factor(daily: pd.DataFrame, close_col: str = "close") -> pd.DataFrame:
+    """
+    Given a daily DataFrame with columns "date", close_col, "split_factor", and "dividend",
+    compute an event factor and then the cumulative reverse adjustment factor so that the latest day remains unchanged.
+    """
     def compute_event_factor(row):
-        if row["last_close"] == 0:
-            div_factor = 1.0
+        if row[close_col] == 0:
+            return 1.0
+        div_factor = (row[close_col] - row["dividend"]) / row[close_col]
+        return (1.0 / row["split_factor"]) * div_factor
+
+    daily["event_factor"] = daily.apply(compute_event_factor, axis=1)
+    daily = daily.sort_values("date").reset_index(drop=True)
+    # Compute reverse cumulative product so that the latest day gets a factor of 1.
+    daily["cum_factor"] = daily["event_factor"][::-1].cumprod()[::-1].shift(-1).fillna(1)
+    return daily
+
+def adjust_aggs_common(aggs: pd.DataFrame, splits: pd.DataFrame, dividends: pd.DataFrame) -> pd.DataFrame:
+    """
+    Adjust aggregate data for splits and dividends using a unified logic:
+      - Ensure a normalized "date" column exists. If absent, assume "window_start" exists.
+      - Group by "date" to get the last row per day (used for computing the adjustment factor).
+      - Merge processed splits and dividends.
+      - Compute the daily cumulative reverse factor.
+      - Merge the factor back onto all rows by "date" and compute adjusted price columns.
+      - If the original data had a "window_start" column, drop the temporary "date" column.
+    """
+    # Determine the time column: use "date" if present, otherwise use "window_start".
+    if "date" not in aggs.columns:
+        if aggs.index.name == "window_start":
+            aggs = aggs.reset_index()
+        if "window_start" in aggs.columns:
+            aggs["date"] = to_ny_normalized(aggs["window_start"])
         else:
-            div_factor = (row["last_close"] - row["dividend"]) / row["last_close"]
-        split_adj = 1.0 / row["split_factor"]
-        return split_adj * div_factor
+            raise ValueError("Input data must have a 'date' or 'window_start' column.")
+    else:
+        aggs["date"] = to_ny_normalized(aggs["date"])
 
-    daily_summary["event_factor"] = daily_summary.apply(compute_event_factor, axis=1)
+    # Sort and group by date to obtain the last row (using the 'close' as the reference price).
+    aggs = aggs.sort_values(["date"]).reset_index(drop=True)
+    daily = aggs.groupby("date").agg(last_close=("close", "last")).reset_index()
 
-    # --- Compute the cumulative reverse adjustment factor ---
-    daily_summary = daily_summary.sort_values("date").reset_index(drop=True)
-    daily_summary["cum_factor"] = (
-        daily_summary["event_factor"][::-1].cumprod()[::-1]
-        .shift(-1)
-        .fillna(1)
-    )
+    # Process splits and dividends.
+    splits = process_splits(splits)
+    dividends = process_dividends(dividends)
+    daily = pd.merge(daily, splits, on="date", how="left")
+    daily["split_factor"] = daily["split_factor"].fillna(1.0)
+    daily = pd.merge(daily, dividends, on="date", how="left")
+    daily["dividend"] = daily["dividend"].fillna(0.0)
 
-    # --- Merge the daily cumulative factor back onto the minute-level data ---
-    df = pd.merge(df, daily_summary[["date", "cum_factor"]], on="date", how="left")
+    # Compute cumulative factor using the day's last_close.
+    daily = compute_daily_cum_factor(daily, close_col="last_close")
 
-    # --- Adjust the price columns for each minute ---
+    # Merge the cumulative factor back onto the original DataFrame.
+    aggs = pd.merge(aggs, daily[["date", "cum_factor"]], on="date", how="left")
+
+    # Compute adjusted price columns.
     for col in ["open", "high", "low", "close"]:
-        df[f"adj_{col}"] = df[col] * df["cum_factor"]
+        aggs[f"adj_{col}"] = aggs[col] * aggs["cum_factor"]
 
-    # Drop the temporary "date" column.
-    df = df.drop(columns=["date"])
+    # If the original data had "window_start", drop the temporary "date" column.
+    if "window_start" in aggs.columns:
+        aggs = aggs.drop(columns=["date"])
 
-    return df
+    return aggs
 
 def main():
-    """
-    Main function to process each ticker's minute aggregation data.
-    For each ticker file (assumed to be in "us_stocks_sip/minute_aggs_by_ticker"),
-    this script reads the minute aggregates, loads the corresponding splits and dividends data,
-    applies the reverse adjustment, and writes the adjusted data to "adjusted_minute_aggs_by_ticker".
-    """
-    base_dir = Path("us_stocks_sip")
+    parser = argparse.ArgumentParser(
+        description="Adjust aggregate (day or minute) stock price data for splits and dividends in reverse "
+                    "so that the most recent prices remain unchanged."
+    )
+    parser.add_argument("--agg_type", type=str, choices=["day", "minute"], default="day",
+                        help="Type of aggregate data (default: day). Used only for selecting default directories.")
+    parser.add_argument("--input_dir", type=str, default=None,
+                        help="Input directory for aggregate files (default depends on agg_type).")
+    parser.add_argument("--output_dir", type=str, default=None,
+                        help="Output directory for adjusted files (default depends on agg_type).")
+    parser.add_argument("--splits_dir", type=str, default="us_stocks_sip/splits_by_ticker",
+                        help="Directory containing splits files (default: us_stocks_sip/splits_by_ticker).")
+    parser.add_argument("--dividends_dir", type=str, default="us_stocks_sip/dividends_by_ticker",
+                        help="Directory containing dividends files (default: us_stocks_sip/dividends_by_ticker).")
+    args = parser.parse_args()
 
-    # Define directories.
-    minute_aggs_dir = base_dir / "minute_aggs_by_ticker"
-    splits_dir = base_dir / "splits_by_ticker"
-    dividends_dir = base_dir / "dividends_by_ticker"
-    output_dir = base_dir / "adjusted_minute_aggs_by_ticker"
-    output_dir.mkdir(exist_ok=True)
+    from pathlib import Path
+    base_dir = Path("us_stocks_sip")
+    if args.agg_type == "day":
+        input_dir = Path(args.input_dir) if args.input_dir else base_dir / "day_aggs_by_ticker"
+        output_dir = Path(args.output_dir) if args.output_dir else base_dir / "adjusted_day_aggs_by_ticker"
+    else:
+        input_dir = Path(args.input_dir) if args.input_dir else base_dir / "minute_aggs_by_ticker"
+        output_dir = Path(args.output_dir) if args.output_dir else base_dir / "adjusted_minute_aggs_by_ticker"
+
+    splits_dir = Path(args.splits_dir)
+    dividends_dir = Path(args.dividends_dir)
+    output_dir.mkdir(exist_ok=True, parents=True)
 
     # Process each ticker file.
-    for minute_file in minute_aggs_dir.glob("*.parquet"):
-        ticker = minute_file.stem
+    for file in input_dir.glob("*.parquet"):
+        ticker = file.stem
         print(f"Processing ticker: {ticker}")
-
         try:
-            minute_aggs = pd.read_parquet(minute_file)
+            aggs = pd.read_parquet(file)
         except Exception as e:
-            print(f"Error reading {minute_file}: {e}")
+            print(f"Error reading {file}: {e}")
             continue
 
         # Load splits for this ticker.
@@ -234,13 +263,15 @@ def main():
         else:
             dividends = pd.DataFrame(columns=["ex_dividend_date", "cash_amount"])
 
-        # Adjust the minute aggregates.
-        adjusted_df = adjust_minute_aggs(minute_aggs, splits, dividends)
+        try:
+            adjusted = adjust_aggs_common(aggs, splits, dividends)
+        except Exception as e:
+            print(f"Error processing {ticker}: {e}")
+            continue
 
-        # Save the adjusted data.
         output_file = output_dir / f"{ticker}.parquet"
         try:
-            adjusted_df.to_parquet(output_file, index=False)
+            adjusted.to_parquet(output_file, index=False)
             print(f"Saved adjusted data for {ticker} to {output_file}")
         except Exception as e:
             print(f"Error writing {output_file}: {e}")

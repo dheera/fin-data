@@ -195,8 +195,8 @@ if __name__ == "__main__":
                         help="Path to the output directory for per-ticker aggregate Parquet files.")
     parser.add_argument("--agg_type", type=str, choices=["day", "minute"], default="day",
                         help="Type of aggregation files to process (day or minute). Default is day.")
-    parser.add_argument("--period_days", type=int, default=365,
-                        help="Number of days to include (default: 365).")
+    parser.add_argument("--period_days", type=int, default=730,
+                        help="Number of days to include (default: 730).")
     parser.add_argument("--batch_size", type=int, default=16,
                         help="Number of files to process in each batch (default: 16).")
     args = parser.parse_args()
