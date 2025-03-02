@@ -47,7 +47,8 @@ def process_file(filepath, date_str):
             df.index = pd.to_datetime(df.index)
 
         # Calculate normalized bid-ask spread: (ask - bid) / last.
-        df["bidask_spread"] = (df["ask"] - df["bid"]) / df["last"]
+        df["spread"] = (df["ask"] - df["bid"])
+        df["spread_frac"] = (df["ask"] - df["bid"]) / df["last"]
 
         # Define time periods.
         premarket = df.between_time("04:00", "09:29:59")
@@ -56,12 +57,18 @@ def process_file(filepath, date_str):
 
         return {
             "ticker": ticker,
-            "pre_mean": premarket["bidask_spread"].mean(),
-            "pre_std": premarket["bidask_spread"].std(),
-            "day_mean": day["bidask_spread"].mean(),
-            "day_std": day["bidask_spread"].std(),
-            "post_mean": postmarket["bidask_spread"].mean(),
-            "post_std": postmarket["bidask_spread"].std()
+            "pre_mean": premarket["spread"].mean(),
+            "pre_mean_frac": premarket["spread_frac"].mean(),
+            "pre_std": premarket["spread"].std(),
+            "pre_std_frac": premarket["spread_frac"].std(),
+            "day_mean": day["spread"].mean(),
+            "day_mean_frac": day["spread_frac"].mean(),
+            "day_std": day["spread"].std(),
+            "day_std_frac": day["spread_frac"].std(),
+            "post_mean": postmarket["spread"].mean(),
+            "post_mean_frac": postmarket["spread_frac"].mean(),
+            "post_std": postmarket["spread"].std(),
+            "post_std_frac": postmarket["spread_frac"].std(),
         }
     except Exception as e:
         print(f"Error processing file {filepath}: {e}")

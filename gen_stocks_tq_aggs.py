@@ -89,7 +89,7 @@ def main():
     parser = argparse.ArgumentParser(description="Aggregate trade and quote data over intervals.")
     parser.add_argument("--quotes_dir", type=str, default="us_stocks_sip/quotes", help="Directory with quotes data")
     parser.add_argument("--trades_dir", type=str, default="us_stocks_sip/trades", help="Directory with trades data")
-    parser.add_argument("--output_dir", type=str, default="aggregated", help="Output directory")
+    parser.add_argument("--output_dir", type=str, default="us_stocks_sip/tq_aggs", help="Output directory")
     parser.add_argument("--interval", type=int, default=10, help="Aggregation interval in seconds")
     parser.add_argument("--workers", type=int, default=4, help="Number of worker processes to use")
     args = parser.parse_args()
