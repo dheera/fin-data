@@ -24,16 +24,28 @@ echo "*** converting stocks/quotes"
 echo "*** converting stocks/trades"
 ./csv2parquet_stocks_trades.py us_stocks_sip/trades_v1 us_stocks_sip/trades --delete-original --workers 16
 
+echo "*** generating stocks/tq_aggs"
+./csv2parquet_stocks_trades.py us_stocks_sip/trades_v1 us_stocks_sip/trades --delete-original --workers 16
+
 sleep
 
+echo "*** fetching splits"
+./download_splits.py
+
+echo "*** fetching dividends"
+./download_dividends.py
+
 echo "*** generating stocks/day_aggs_by_ticker"
-./gen_aggs_by_ticker_2.py --agg_type day us_stocks_sip/day_aggs us_stocks_sip/day_aggs_by_ticker/ --period_days 10000
+./gen_aggs_by_ticker.py --agg_type day us_stocks_sip/day_aggs us_stocks_sip/day_aggs_by_ticker/ --period_days 10000
 
 echo "*** generating stocks/adjusted_day_aggs_by_ticker"
 ./gen_aggs_adjusted.py --agg_type day
 
 echo "*** generating stocks/minute_aggs_by_ticker"
-./gen_aggs_by_ticker_2.py --agg_type minute us_stocks_sip/minute_aggs us_stocks_sip/minute_aggs_by_ticker/ --period_days 730
+./gen_aggs_by_ticker.py --agg_type minute us_stocks_sip/minute_aggs us_stocks_sip/minute_aggs_by_ticker/ --period_days 730
+
+echo "*** generating stocks/adjusted_day_aggs_by_ticker"
+./gen_aggs_adjusted.py --agg_type minute
 
 #sleep 1
 #echo "*** converting options/quotes"
