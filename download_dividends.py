@@ -5,11 +5,14 @@ import pandas as pd
 import json
 import glob
 import requests
+from tqdm import tqdm
+from datetime import datetime
+from dateutil.relativedelta import relativedelta
+
 with open("polygon.json", "r") as f:
     config = json.loads(f.read())
 
-
-def get_dividends():
+def get_dividends(start=None):
     url = "https://api.polygon.io/v3/reference/dividends"
     results = []
     last_year = None
@@ -20,64 +23,56 @@ def get_dividends():
                 "apiKey": config["api_key"],
                 "limit": 1000,
                 "order": "desc",
+                "ex_dividend_date.gt": start,
                 "sort": "ex_dividend_date",
             }
         )
         response = r.json()
+        results += response["results"]
         url = response.get("next_url", None)
-        for result in response["results"]:
-            if "ex_dividend_date" not in result:
-                continue
-            year = result["ex_dividend_date"][:4]
-
-            if last_year is None:
-                last_year = year
-
-            print(f'{result["ticker"]} {result.get("pay_date")}')
-
-            if year != last_year:
-                pd.DataFrame(results).to_parquet(f"us_stocks_sip/dividends_by_year/{last_year}.parquet")
-                results = []
-                print(f"wrote {last_year}.parquet")
-                time.sleep(2)
-            
-            results.append(result)
-            last_year = year
+        print(f"Fetched {len(results)} dividends")
         time.sleep(0.1)
 
-    pd.DataFrame(results).to_parquet(f"us_stocks_sip/dividends_by_year/{last_year}.parquet")
-    print(f"wrote {last_year.parquet}")
+    return results
 
 if __name__ == "__main__":
-    os.makedirs("us_stocks_sip/dividends_by_year", exist_ok = True)
-    get_dividends()
+    file_path = "us_stocks_sip/dividends.parquet"
+    if os.path.exists(file_path):
+        timestamp = os.path.getmtime(file_path)
+        last_modified = datetime.fromtimestamp(timestamp)
+        months_ago = last_modified - relativedelta(months=2)
 
-    files = glob.glob("us_stocks_sip/dividends_by_year/*.parquet")
-    dfs = [pd.read_parquet(file) for file in files]
-    df = pd.concat(dfs, ignore_index=True)
-    
-    # Step 2: Convert date fields to date-only (i.e., remove time component)
-    date_columns = ["ex_dividend_date", "pay_date", "record_date", "declaration_date"]
-    for col in date_columns:
-        df[col] = pd.to_datetime(df[col], errors="coerce").dt.date
+        print(f"Fetching dividends from {months_ago.strftime('%Y-%m-%d')}")
+        dividends = get_dividends(start = months_ago.strftime("%Y-%m-%d"))
 
-    # Step 3: Remove the "id" column
-    df.drop(columns=["id"], inplace=True)
+        df_old = pd.read_parquet(file_path)
+        df = pd.DataFrame(dividends)
 
-    # Step 4: Set multi-index by ticker and ex_dividend_date, then sort the DataFrame
-    df.set_index(["ticker", "ex_dividend_date"], inplace=True)
-    df.sort_index(inplace=True)
+        df["ex_dividend_date"] = pd.to_datetime(df["ex_dividend_date"], errors="coerce").dt.date
+        df["pay_date"] = pd.to_datetime(df["pay_date"], errors="coerce").dt.date
+        df["record_date"] = pd.to_datetime(df["record_date"], errors="coerce").dt.date
+        df["declaration_date"] = pd.to_datetime(df["declaration_date"], errors="coerce").dt.date
 
-    # Step 5: Write the combined DataFrame to 'dividends.parquet'
+        df.drop(columns=["id"], inplace=True)
+        df.set_index(["ticker", "ex_dividend_date"], inplace=True)
+
+        df = pd.concat([df_old, df])
+        df = df[~df.index.duplicated(keep='first')]
+        df.sort_index(inplace=True)
+
+    else:
+        print(f"Fetching all dividends")
+        dividends = get_dividends()
+        df = pd.DataFrame(dividends)
+        df["ex_dividend_date"] = pd.to_datetime(df["ex_dividend_date"], errors="coerce").dt.date
+        df["pay_date"] = pd.to_datetime(df["pay_date"], errors="coerce").dt.date
+        df["record_date"] = pd.to_datetime(df["record_date"], errors="coerce").dt.date
+        df["declaration_date"] = pd.to_datetime(df["declaration_date"], errors="coerce").dt.date
+        df.drop(columns=["id"], inplace=True)
+        df.set_index(["ticker", "ex_dividend_date"], inplace=True)
+        df.sort_index(inplace=True)
+
+    print("Writing us_stocks_sip/dividends.parquet")
+    print(df)
     df.to_parquet("us_stocks_sip/dividends.parquet")
-
-    # Step 6: Create output directory for per-ticker files
-    os.makedirs("us_stocks_sip/dividends_by_ticker", exist_ok=True)
-
-    # Step 7: Write each ticker's dividends to a separate parquet file
-    for ticker, group in df.groupby(level="ticker"):
-        if "/" in ticker:
-            continue
-        output_file = os.path.join("us_stocks_sip/dividends_by_ticker", f"{ticker}.parquet")
-        group.to_parquet(output_file)
 
