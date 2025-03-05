@@ -101,6 +101,8 @@ import os
 from pathlib import Path
 import pandas as pd
 import argparse
+import pandas as pd
+import concurrent.futures
 
 def to_ny_normalized(series):
     """
@@ -205,6 +207,61 @@ def adjust_aggs_common(aggs: pd.DataFrame, splits: pd.DataFrame, dividends: pd.D
 
     return aggs
 
+# Ensure adjust_aggs_common is imported or defined in this module.
+# from your_module import adjust_aggs_common
+
+def process_ticker(file, splits_dir, dividends_dir, output_dir):
+    """
+    Process one ticker file: load aggregate data, adjust for splits and dividends,
+    then write the adjusted data to the output directory.
+    """
+    ticker = file.stem
+    result = f"Processing ticker: {ticker}\n"
+    try:
+        aggs = pd.read_parquet(file)
+    except Exception as e:
+        return f"Error reading {file}: {e}\n"
+
+    # Load splits for this ticker.
+    splits_file = splits_dir / f"{ticker}.parquet"
+    if splits_file.exists():
+        try:
+            splits = pd.read_parquet(splits_file)
+        except Exception as e:
+            result += f"Error reading splits {splits_file}: {e}\n"
+            splits = pd.DataFrame(columns=["execution_date", "split_from", "split_to"])
+        if splits.empty:
+            splits = pd.DataFrame(columns=["execution_date", "split_from", "split_to"])
+    else:
+        splits = pd.DataFrame(columns=["execution_date", "split_from", "split_to"])
+
+    # Load dividends for this ticker.
+    dividends_file = dividends_dir / f"{ticker}.parquet"
+    if dividends_file.exists():
+        try:
+            dividends = pd.read_parquet(dividends_file)
+        except Exception as e:
+            result += f"Error reading dividends {dividends_file}: {e}\n"
+            dividends = pd.DataFrame(columns=["ex_dividend_date", "cash_amount"])
+        if dividends.empty:
+            dividends = pd.DataFrame(columns=["ex_dividend_date", "cash_amount"])
+    else:
+        dividends = pd.DataFrame(columns=["ex_dividend_date", "cash_amount"])
+
+    try:
+        adjusted = adjust_aggs_common(aggs, splits, dividends)
+    except Exception as e:
+        return f"Error processing {ticker}: {e}\n"
+
+    output_file = output_dir / f"{ticker}.parquet"
+    try:
+        adjusted.to_parquet(output_file, index=False)
+        result += f"Saved adjusted data for {ticker} to {output_file}\n"
+    except Exception as e:
+        result += f"Error writing {output_file}: {e}\n"
+
+    return result
+
 def main():
     parser = argparse.ArgumentParser(
         description="Adjust aggregate (day or minute) stock price data for splits and dividends in reverse "
@@ -220,9 +277,10 @@ def main():
                         help="Directory containing splits files (default: us_stocks_sip/splits_by_ticker).")
     parser.add_argument("--dividends_dir", type=str, default="us_stocks_sip/dividends_by_ticker",
                         help="Directory containing dividends files (default: us_stocks_sip/dividends_by_ticker).")
+    parser.add_argument("--workers", type=int, default=4,
+                        help="Number of worker processes to use (default: 4)")
     args = parser.parse_args()
 
-    from pathlib import Path
     base_dir = Path("us_stocks_sip")
     if args.agg_type == "day":
         input_dir = Path(args.input_dir) if args.input_dir else base_dir / "day_aggs_by_ticker"
@@ -235,46 +293,19 @@ def main():
     dividends_dir = Path(args.dividends_dir)
     output_dir.mkdir(exist_ok=True, parents=True)
 
-    # Process each ticker file.
-    for file in input_dir.glob("*.parquet"):
-        ticker = file.stem
-        print(f"Processing ticker: {ticker}")
-        try:
-            aggs = pd.read_parquet(file)
-        except Exception as e:
-            print(f"Error reading {file}: {e}")
-            continue
+    files = list(input_dir.glob("*.parquet"))
+    if not files:
+        print("No files found in", input_dir)
+        return
 
-        # Load splits for this ticker.
-        splits_file = splits_dir / f"{ticker}.parquet"
-        if splits_file.exists():
-            splits = pd.read_parquet(splits_file)
-            if splits.empty:
-                splits = pd.DataFrame(columns=["execution_date", "split_from", "split_to"])
-        else:
-            splits = pd.DataFrame(columns=["execution_date", "split_from", "split_to"])
-
-        # Load dividends for this ticker.
-        dividends_file = dividends_dir / f"{ticker}.parquet"
-        if dividends_file.exists():
-            dividends = pd.read_parquet(dividends_file)
-            if dividends.empty:
-                dividends = pd.DataFrame(columns=["ex_dividend_date", "cash_amount"])
-        else:
-            dividends = pd.DataFrame(columns=["ex_dividend_date", "cash_amount"])
-
-        try:
-            adjusted = adjust_aggs_common(aggs, splits, dividends)
-        except Exception as e:
-            print(f"Error processing {ticker}: {e}")
-            continue
-
-        output_file = output_dir / f"{ticker}.parquet"
-        try:
-            adjusted.to_parquet(output_file, index=False)
-            print(f"Saved adjusted data for {ticker} to {output_file}")
-        except Exception as e:
-            print(f"Error writing {output_file}: {e}")
+    # Process each ticker file concurrently.
+    with concurrent.futures.ProcessPoolExecutor(max_workers=args.workers) as executor:
+        futures = [
+            executor.submit(process_ticker, file, splits_dir, dividends_dir, output_dir)
+            for file in files
+        ]
+        for future in concurrent.futures.as_completed(futures):
+            print(future.result())
 
 if __name__ == "__main__":
     main()
