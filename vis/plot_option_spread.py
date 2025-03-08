@@ -97,7 +97,17 @@ def load_chain(date, underlying, expiry, dte=None):
 
     df = pd.read_parquet(parquet_file)
     df = df.reset_index()
+
+    # After setting window_start as datetime:
     df['window_start'] = pd.to_datetime(df['window_start'])
+
+    # Create a complete minute index from the earliest to the latest timestamp in the data
+    full_index = pd.date_range(df['window_start'].min(), df['window_start'].max(), freq='T')
+
+    # Set window_start as the index and forward fill for each option (group by type and strike)
+    df = df.set_index('window_start')
+    df = df.groupby(['type', 'strike'], group_keys=False).apply(lambda g: g.reindex(full_index).ffill())
+    df = df.reset_index().rename(columns={'index': 'window_start'})
 
     # Filter by underlying (exact match)
     df = df[df['underlying'] == underlying]
@@ -134,25 +144,80 @@ def load_chain(date, underlying, expiry, dte=None):
 
 def estimate_underlying_at_time(df, trade_time):
     """
-    Estimate the underlying price at the given trade_time by merging call and put prices
-    and selecting the strike where their absolute difference is minimized.
+    Estimate the underlying price at the given trade_time by:
+      1. Computing OHLC4 = (open + high + low + close) / 4 for each option.
+      2. Merging calls and puts by strike.
+      3. Finding where the difference in OHLC4 (call - put) crosses zero between strikes.
+      4. If no sign crossing is found, pick the strike with the minimal absolute difference.
     
     Parameters:
-      df (pd.DataFrame): Option chain data.
-      trade_time (pd.Timestamp): Time at which to estimate the underlying.
+      df (pd.DataFrame): Option chain data. Must have columns:
+                        ['type', 'strike', 'open', 'high', 'low', 'close', 'window_start'].
+      trade_time (pd.Timestamp): The timestamp at which to estimate the underlying.
     
     Returns:
       float or None: Estimated underlying price, or None if not possible.
     """
-    frame = df[df['window_start'] == trade_time]
-    calls = frame[frame['type'] == 'C'][['strike','close']]
-    puts = frame[frame['type'] == 'P'][['strike','close']]
+    # Filter to the exact trade_time
+    frame = df[df['window_start'] == trade_time].copy()
+    if frame.empty:
+        return None
+    
+    # We need both calls and puts in the same time slice
+    calls = frame[frame['type'] == 'C'].copy()
+    puts  = frame[frame['type'] == 'P'].copy()
     if calls.empty or puts.empty:
         return None
-    merged = pd.merge(calls, puts, on='strike', suffixes=('_call', '_put'))
-    merged['diff'] = (merged['close_call'] - merged['close_put']).abs()
-    row = merged.loc[merged['diff'].idxmin()]
-    return row['strike']
+    
+    # Compute OHLC4 for each row
+    for subset in (calls, puts):
+        subset['ohlc4'] = (subset['open'] + subset['high'] + subset['low'] + subset['close']) / 4.0
+    
+    # Merge calls and puts on 'strike'
+    merged = pd.merge(calls[['strike','ohlc4']], puts[['strike','ohlc4']], on='strike',
+                      suffixes=('_call','_put'))
+    if merged.empty:
+        return None
+    
+    # Sort by strike
+    merged = merged.sort_values('strike').reset_index(drop=True)
+    # Compute the difference in OHLC4
+    merged['diff'] = merged['ohlc4_call'] - merged['ohlc4_put']
+    
+    # We look for a sign change in consecutive strikes
+    # i.e. diff[i] and diff[i+1] have opposite signs => zero crossing
+    diffs = merged['diff'].values
+    strikes = merged['strike'].values
+    
+    crossing_index = None
+    for i in range(len(diffs) - 1):
+        if diffs[i] == 0:
+            # Perfect match
+            return strikes[i]
+        if diffs[i] * diffs[i+1] < 0:
+            # Sign crossing between i and i+1
+            crossing_index = i
+            break
+    
+    if crossing_index is not None:
+        # Linear interpolation:
+        # We want to find strike X s.t. diff(X) = 0 between strikes[i] and strikes[i+1].
+        # Let x0 = strikes[i], x1 = strikes[i+1]
+        # Let y0 = diffs[i],    y1 = diffs[i+1]
+        # We solve y(X) = 0 => X = x0 - y0 * ( (x1 - x0) / (y1 - y0) )
+        i2 = crossing_index + 1
+        x0, x1 = strikes[crossing_index], strikes[i2]
+        y0, y1 = diffs[crossing_index], diffs[i2]
+        if (y1 - y0) != 0:
+            x_star = x0 - y0 * ( (x1 - x0) / (y1 - y0) )
+            return x_star
+        else:
+            # degenerate case: same diff => no actual sign crossing
+            pass
+    
+    # If no sign crossing, pick the strike with the minimal absolute difference
+    idx_min = merged['diff'].abs().idxmin()
+    return merged.loc[idx_min, 'strike']
 
 # -------------------------------------------------------------------
 # 4. Defining trades with sign convention: short => +1, long => -1
@@ -214,23 +279,24 @@ def get_trade_legs(trade_type, center, width):
 
 def lookup_leg_price(df, leg, trade_time):
     """
-    Return the 'close' price for the given leg at trade_time, or np.nan if not found.
-    
-    Because short => pos=+1, a short leg adds to initial credit if we do:
-      initial_credit += pos * price
+    Return the OHLC4 price for a given leg at trade_time.
+    If no row is found, return NaN.
     """
     opt_type, strike, pos = leg
+    # Filter by type & strike
     tol = 0.001
-    frame = df[(df['type'] == opt_type) & (np.abs(df['strike'] - strike) < tol)]
+    frame = df[
+        (df['type'] == opt_type) &
+        (abs(df['strike'] - strike) < tol) &
+        (df['window_start'] == trade_time)
+    ]
     if frame.empty:
-        print(f"No data found for leg: type {opt_type}, strike {strike}")
         return np.nan
-    price_series = frame[frame['window_start'] == trade_time]['close']
-    if price_series.empty:
-        price = frame.iloc[0]['close']
-    else:
-        price = price_series.iloc[0]
-    return price
+    
+    # Compute OHLC4
+    row = frame.iloc[0]
+    ohlc4 = (row['open'] + row['high'] + row['low'] + row['close']) / 4.0
+    return ohlc4
 
 # -------------------------------------------------------------------
 # 6. Compute expiration payoff
