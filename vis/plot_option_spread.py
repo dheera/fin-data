@@ -74,20 +74,23 @@ def load_chain(date, underlying, expiry, dte=None):
         print(f"Parquet file not found: {parquet_file}")
         return None
 
-    # Read data and reset the index.
+    # Read the parquet file.
     df = pd.read_parquet(parquet_file)
-    df = df.reset_index()
-    # If 'window_start' column doesn't exist, assume the first column is the time column.
-    if 'window_start' not in df.columns:
-        df = df.rename(columns={df.columns[0]: 'window_start'})
-    # Convert to datetime and remove timezone info.
+    # If the file is written with a MultiIndex (as in your case), reset it so that
+    # "window_start" (along with underlying, expiry, type, strike) becomes a column.
+    if "window_start" not in df.columns:
+        df = df.reset_index()
+    
+    # Convert window_start to datetime (dropping timezone information)
     df['window_start'] = pd.to_datetime(df['window_start']).dt.tz_localize(None)
 
+    # Filter by underlying
     df = df[df['underlying'] == underlying]
     if df.empty:
         print("No data found for the given underlying and date.")
         return None
 
+    # Determine the expiry if not provided
     if expiry is None:
         first_time = df['window_start'].min()
         if dte is not None:
@@ -109,7 +112,9 @@ def load_chain(date, underlying, expiry, dte=None):
         print("No data for the chosen expiry.")
         return None
 
+    # Create a continuous minute index from the minimum to maximum timestamp.
     full_index = pd.date_range(df['window_start'].min(), df['window_start'].max(), freq='T')
+    # Set the window_start column as the index and then group and fill missing minutes.
     df = df.set_index('window_start')
     df = df.groupby(['type', 'strike'], group_keys=False).apply(lambda g: fill_forward(g, full_index))
     df.index.name = 'window_start'
@@ -199,7 +204,6 @@ def lookup_leg_price_ohlc4(df, leg, trade_time):
     exact = group[group['window_start'] == trade_time]
     if not exact.empty:
         row = exact.iloc[0]
-        print(row)
         return (row['open'] + row['high'] + row['low'] + row['close']) / 4.0
     group = group.copy()
     group['time_diff'] = (pd.to_datetime(group['window_start']) - trade_time).abs()
@@ -281,7 +285,7 @@ def animate_expiration_payoff(trade_type, center, width, date, time_str, underly
     if chain is None:
         return
 
-    # Filter timestamps to those >= trade entry time
+    # Filter timestamps to those >= trade entry time.
     all_times = pd.to_datetime(chain['window_start'].unique())
     start_time = pd.to_datetime(f"{date} {time_str}").tz_localize(None)
     valid_times = sorted([t for t in all_times if t >= start_time])
