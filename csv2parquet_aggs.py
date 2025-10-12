@@ -15,11 +15,12 @@ from datetime import datetime
 from pathlib import Path
 
 class AggDataPreprocessor:
-    def __init__(self, in_dir, out_dir, delete_original):
+    def __init__(self, in_dir, out_dir, delete_original, utc):
         self.in_dir = Path(in_dir)
         self.out_dir = Path(out_dir)
         self.out_dir.mkdir(parents=True, exist_ok=True)
         self.delete_original = delete_original
+        self.utc = utc
 
     def reindex_and_store_all(self):
         """
@@ -63,7 +64,10 @@ class AggDataPreprocessor:
             if field in df.columns:
                 df[field] = df[field].astype('int32')
 
-        df["window_start"] = pd.to_datetime(df["window_start"], utc=True).dt.tz_convert("America/New_York")
+        if self.utc:
+            df["window_start"] = pd.to_datetime(df["window_start"], utc=True).dt.tz_convert("UTC")
+        else:
+            df["window_start"] = pd.to_datetime(df["window_start"], utc=True).dt.tz_convert("America/New_York")
 
         if is_options:
             df.reset_index(inplace=True)
@@ -87,9 +91,10 @@ if __name__ == "__main__":
     parser.add_argument("in_dir", type=str, help="Path to the directory containing CSV.gz files.")
     parser.add_argument("out_dir", type=str, help="Path to the directory to store Parquet files.")
     parser.add_argument("--delete-original", action="store_true", help="Delete original files (default: False)")
+    parser.add_argument("--utc", action="store_true")
 
     args = parser.parse_args()
 
-    preprocessor = AggDataPreprocessor(args.in_dir, args.out_dir, args.delete_original)
+    preprocessor = AggDataPreprocessor(args.in_dir, args.out_dir, args.delete_original, args.utc)
     preprocessor.reindex_and_store_all()
 

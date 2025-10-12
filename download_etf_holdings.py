@@ -59,6 +59,7 @@ def fetch_etf_data(ticker):
     }
     
     with requests.StealthSession() as session:
+        print(page_url)
         response = session.get(page_url)
         html = response.content.decode('utf-8')
         pattern = re.compile(r'(\d+)===' + re.escape(ticker))

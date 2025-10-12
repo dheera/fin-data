@@ -40,7 +40,7 @@ def compute_regression_constants():
     
     # Determine common maximum date and filter to the most recent 2 years
     common_max_date = min(spy.index.max(), spx.index.max())
-    start_date = common_max_date - pd.DateOffset(years=2)
+    start_date = common_max_date - pd.DateOffset(months=6)
     
     spy_recent = spy[spy.index >= start_date].copy()
     spx_recent = spx[spx.index >= start_date].copy()

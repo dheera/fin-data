@@ -37,6 +37,25 @@ def get_recent_files(input_dir, period_days=365):
     recent_files.sort(key=lambda f: datetime.strptime(os.path.basename(f).replace(".parquet", ""), "%Y-%m-%d"))
     return recent_files
 
+def get_files_by_date_range(input_dir, start_date, end_date):
+    """
+    Finds all Parquet files in input_dir whose filenames follow the "YYYY-MM-DD.parquet" format,
+    and returns a chronologically sorted list of files whose dates fall between start_date and end_date (inclusive).
+    """
+    all_files = glob(os.path.join(input_dir, "*.parquet"))
+    files_with_date = []
+    for file in all_files:
+        basename = os.path.basename(file)
+        date_str = basename.replace(".parquet", "")
+        try:
+            file_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+            files_with_date.append((file, file_date))
+        except Exception:
+            print(f"Skipping file {file}: cannot parse date from filename.")
+    selected_files = [file for file, file_date in files_with_date if start_date <= file_date <= end_date]
+    selected_files.sort(key=lambda f: datetime.strptime(os.path.basename(f).replace(".parquet", ""), "%Y-%m-%d"))
+    return selected_files
+
 def get_latest_window_starts(output_dir):
     """
     For each per-ticker Parquet file in output_dir, read its index (assumed to be 'window_start')
@@ -127,10 +146,10 @@ def process_ticker(task):
     pq.write_table(table, output_path, compression="snappy")
     return ticker
 
-def process_aggs(input_dir, output_dir, agg_type="day", period_days=365):
+def process_aggs(input_dir, output_dir, agg_type="day", period_days=365, start_date=None, end_date=None):
     """
     Process aggregate Parquet files (day or minute) by:
-      - Selecting recent files (based on period_days)
+      - Selecting files within a specified date range or recent period
       - Reading all files concurrently into memory with a process pool (using tqdm)
       - Converting all 'window_start' timestamps to New York time
       - Concatenating all data and grouping by ticker, then
@@ -138,15 +157,26 @@ def process_aggs(input_dir, output_dir, agg_type="day", period_days=365):
         processing these groups concurrently.
     """
     os.makedirs(output_dir, exist_ok=True)
-    recent_files = get_recent_files(input_dir, period_days=period_days)
-    if not recent_files:
-        print("No recent files found in the input directory.")
+    
+    if start_date and end_date:
+        try:
+            start_date_obj = datetime.strptime(start_date, "%Y-%m-%d").date()
+            end_date_obj = datetime.strptime(end_date, "%Y-%m-%d").date()
+        except Exception as e:
+            print(f"Error parsing start_date or end_date: {e}")
+            return
+        selected_files = get_files_by_date_range(input_dir, start_date_obj, end_date_obj)
+    else:
+        selected_files = get_recent_files(input_dir, period_days=period_days)
+
+    if not selected_files:
+        print("No files found in the specified date range or period in the input directory.")
         return
 
     print("Reading all Parquet files concurrently...")
     with concurrent.futures.ProcessPoolExecutor() as executor:
-        dfs = list(tqdm(executor.map(read_file, recent_files),
-                        total=len(recent_files),
+        dfs = list(tqdm(executor.map(read_file, selected_files),
+                        total=len(selected_files),
                         desc="Reading Parquet Files"))
     # Filter out any failed reads
     dfs = [df for df in dfs if df is not None]
@@ -176,17 +206,32 @@ def process_aggs(input_dir, output_dir, agg_type="day", period_days=365):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Concatenate daily aggregate (day or minute) Parquet files into per-ticker files for a specified period."
+        description="Concatenate daily aggregate (day or minute) Parquet files into per-ticker files for a specified period or date range."
     )
     parser.add_argument("input_dir", type=str,
-                        help="Path to the input directory containing daily aggregate Parquet files.")
+                        help="Path to the input directory containing aggregate Parquet files.")
     parser.add_argument("output_dir", type=str,
                         help="Path to the output directory for per-ticker aggregate Parquet files.")
     parser.add_argument("--agg_type", type=str, choices=["day", "minute"], default="day",
                         help="Type of aggregation files to process (day or minute). Default is day.")
-    parser.add_argument("--period_days", type=int, default=730,
-                        help="Number of days to include (default: 730).")
+    # Optional mutually exclusive date range or recent_days
+    parser.add_argument("--recent_days", type=int,
+                        help="Number of recent days to include (e.g., 730).")
+    parser.add_argument("--start_date", type=str,
+                        help="Start date in YYYY-MM-DD format.")
+    parser.add_argument("--end_date", type=str,
+                        help="End date in YYYY-MM-DD format.")
+
     args = parser.parse_args()
 
-    process_aggs(args.input_dir, args.output_dir, agg_type=args.agg_type, period_days=args.period_days)
+    # Validate that either recent_days is provided or both start_date and end_date are provided (or none, in which case default is used)
+    if args.recent_days is not None and (args.start_date or args.end_date):
+        parser.error("Specify either --recent_days OR --start_date and --end_date, not both.")
+    if (args.start_date and not args.end_date) or (args.end_date and not args.start_date):
+        parser.error("Both --start_date and --end_date must be provided together.")
+    # Set default recent_days if none is provided and no date range is provided
+    period_days = args.recent_days if args.recent_days is not None else 730
+
+    process_aggs(args.input_dir, args.output_dir, agg_type=args.agg_type, period_days=period_days,
+                 start_date=args.start_date, end_date=args.end_date)
 

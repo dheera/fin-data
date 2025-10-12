@@ -115,12 +115,10 @@ if __name__ == "__main__":
         csv_files = sorted(glob(os.path.join(args.in_dir, "*.csv.gz")), reverse=True)
         for csv_file in tqdm(csv_files):
             if os.path.getsize(csv_file) == 0:
-                print("{csv_file} already 0, skipping")
                 continue
             date_str = os.path.basename(csv_file).split('.')[0]  # Extract date from filename
             out_dir = os.path.join(args.out_dir, date_str)
             if os.path.exists(out_dir) and len(os.listdir(out_dir)) > 9000:
-                print(f"output dir {out_dir} already exists, skipping")
                 if args.delete_original:
                     print(f"Deleting original {csv_file}")
                     os.remove(csv_file)

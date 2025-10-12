@@ -5,6 +5,7 @@ import glob
 import argparse
 import pandas as pd
 import concurrent.futures
+from tqdm import tqdm
 
 def aggregate_interval(df, time_col, agg_columns, interval):
     # Convert time column to datetime, sort the values, and set as index.
@@ -50,7 +51,6 @@ def process_day(ticker, date_str, quotes_file, trades_file, output_file, interva
             volume=('size', 'sum')
         )
     else:
-        print(f"Trades file does not exist for {ticker} on {date_str}. Skipping.")
         return
 
     # Merge the aggregated trades and quotes data on the time index.
@@ -72,7 +72,6 @@ def process_day(ticker, date_str, quotes_file, trades_file, output_file, interva
         first_valid_index = merged.index[condition.argmax()]
         merged = merged.loc[first_valid_index:]
     else:
-        print(f"No complete data found for {ticker} on {date_str}. Skipping.")
         return
 
     # Rename index to window_start.
@@ -102,7 +101,7 @@ def main():
 
     with concurrent.futures.ProcessPoolExecutor(max_workers=args.workers) as executor:
         futures = []
-        for date_path in date_dirs:
+        for date_path in tqdm(date_dirs):
             date_str = os.path.basename(date_path)  # e.g. "2024-11-27"
             output_date_dir = os.path.join(args.output_dir, date_str)
             processed_files = set(os.listdir(output_date_dir)) if os.path.exists(output_date_dir) else set()
@@ -114,7 +113,6 @@ def main():
             for quotes_file in quotes_files:
                 filename = os.path.basename(quotes_file)
                 if filename in processed_files:
-                    print(f"Output for {filename} already exists. Skipping.")
                     continue
 
                 ticker = filename[len(date_str)+1:-8]

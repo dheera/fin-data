@@ -56,6 +56,10 @@ def download(prefix, year_start = 2021, year_end = 2026):
 download('us_indices/minute_aggs_v1/', year_start = 2024, year_end = 2026)
 download('us_indices/day_aggs_v1/', year_start = 2024, year_end = 2026)
 
+download('global_forex/day_aggs_v1/', year_start = 2010, year_end = 2026)
+download('global_forex/minute_aggs_v1/', year_start = 2010, year_end = 2026)
+download('global_crypto/day_aggs_v1/', year_start = 2010, year_end = 2026)
+download('global_crypto/minute_aggs_v1/', year_start = 2010, year_end = 2026)
 download('us_stocks_sip/minute_aggs_v1/', year_start = 2024, year_end = 2026)
 download('us_stocks_sip/day_aggs_v1/', year_start = 2024, year_end = 2026)
 download('us_stocks_sip/quotes_v1/', year_start = 2023, year_end = 2026)
@@ -63,7 +67,7 @@ download('us_stocks_sip/trades_v1/', year_start = 2023, year_end = 2026)
 
 download('us_options_opra/minute_aggs_v1/', year_start = 2024, year_end = 2026)
 download('us_options_opra/day_aggs_v1/', year_start = 2024, year_end = 2026)
-# download('us_options_opra/quotes_v1/', year_start = 2025, year_end = 2026) # huge 100GB files
+#download('us_options_opra/quotes_v1/', year_start = 2025, year_end = 2026) # huge 100GB files
 download('us_options_opra/trades_v1/', year_start = 2025, year_end = 2026)
 
 
