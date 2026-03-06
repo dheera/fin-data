@@ -6,6 +6,7 @@
 # ./csv2parquet.py --in_dir us_options_opra/minute_aggs_v1/ --out_dir us_options_opra/minute_aggs_parquet/
 # ./csv2parquet.py --in_dir us_indices/minute_aggs_v1/ --out_dir us_indices/minute_aggs_parquet/
 
+import gzip
 import os
 import argparse
 import pandas as pd
@@ -52,8 +53,16 @@ class AggDataPreprocessor:
         Args:
             file (Path): Path to the CSV file.
         """
-        df = pd.read_csv(file)
+        try:
+           df = pd.read_csv(file)
+        except gzip.BadGzipFile:
+           os.unlink(file)
+           print(f"Bad gzip file {file}, removing")
+           return
 
+        if len(df) == 0:
+           print("No data lines, skipping: {file}")
+           return
         is_options = df.reset_index()['ticker'].iloc[0].startswith("O:")
         
         # Convert timestamp to datetime index
