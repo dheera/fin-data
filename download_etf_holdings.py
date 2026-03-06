@@ -33,7 +33,7 @@ def fetch_etf_data(ticker):
     payload = {
         "query": "topHoldings",
         "variables": {
-            "fund_id": "559",  # using static value as per example; update if necessary
+            "fund_id": "559",  # to be updated after querying html page
             "ticker": ticker,
             "fund_isin": ""
         }
