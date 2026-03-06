@@ -43,6 +43,13 @@ echo "*** fetching dividends"
 echo "*** generating stocks/day_aggs_by_ticker"
 ./gen_aggs_by_ticker.py --agg_type day us_stocks_sip/day_aggs us_stocks_sip/day_aggs_by_ticker/ --recent_days 10000
 
+./gen_last_n_day_aggs.py us_stocks_sip/day_aggs --recent-days 2920
+./gen_last_n_day_aggs.py us_stocks_sip/day_aggs --recent-days 1460
+./gen_last_n_day_aggs.py us_stocks_sip/day_aggs --recent-days 730
+./gen_last_n_day_aggs.py us_stocks_sip/day_aggs --recent-days 365
+
+./gen_last_n_adjusted_day_aggs.py us_stocks_sip/day_aggs/last365.parquet -o us_stocks_sip/day_aggs/adjusted_last365.parquet
+
 echo "*** generating stocks/adjusted_day_aggs_by_ticker"
 ./gen_aggs_adjusted.py --agg_type day --workers 16
 
