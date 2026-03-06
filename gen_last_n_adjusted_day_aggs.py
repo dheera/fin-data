@@ -97,11 +97,22 @@ def main():
         df.groupby("ticker", sort=False)["event_factor"]
         .transform(lambda g: g.iloc[::-1].cumprod().iloc[::-1].shift(-1).fillna(1.0).astype(np.float64))
     )
+    # Volume adjusts by split factor only (same reverse cumprod of 1/split_factor)
+    df["volume_event_factor"] = 1.0 / df["split_factor"]
+    df["cum_volume_factor"] = (
+        df.groupby("ticker", sort=False)["volume_event_factor"]
+        .transform(lambda g: g.iloc[::-1].cumprod().iloc[::-1].shift(-1).fillna(1.0).astype(np.float64))
+    )
 
     price_cols = ["open", "high", "low", "close"]
     df = df.assign(**{f"adj_{c}": df[c].astype(np.float64) * df["cum_factor"] for c in price_cols})
+    if "volume" in df.columns:
+        df["adj_volume"] = (df["volume"].astype(np.float64) * df["cum_volume_factor"]).astype(np.int64)
 
-    out = df.drop(columns=["date_norm", "split_factor", "dividend", "event_factor", "cum_factor"], errors="ignore")
+    out = df.drop(
+        columns=["date_norm", "split_factor", "dividend", "event_factor", "cum_factor", "volume_event_factor", "cum_volume_factor"],
+        errors="ignore",
+    )
     out = out.set_index(["date", "ticker"]).sort_index()
     out.to_parquet(output_path, compression="snappy")
     print(f"Wrote {output_path} ({len(out):,} rows).")
