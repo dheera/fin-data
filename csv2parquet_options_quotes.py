@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
-import argparse
+
 import os
-import glob
+import argparse
 import gzip
+import shutil
 import pyarrow as pa
 import pyarrow.csv as pacsv
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
+from glob import glob
 from tqdm import tqdm
 
-def process_file(input_filename, output_filename, tickers):
-    """
-    Uses PyArrow to stream-read a gzipped CSV file, filter rows based on a ticker list,
-    parse the tickers (extracting underlying, expiry, opt_type, and strike), and write the 
-    resulting rows to a Parquet file. If the CSV is empty, the file is skipped.
-    """
-    # Define column types for CSV reading.
+TICKER_PATTERN = r"O:(?P<underlying>.+?)(?P<expiry>\d{6})(?P<type>[CP])(?P<strike>\d{8})"
+CHUNK_ROWS = 10_000_000
+
+
+def process_file(input_filename, date_dir, base_name):
     column_types = {
         "ticker": pa.string(),
         "sip_timestamp": pa.int64(),
@@ -24,107 +24,125 @@ def process_file(input_filename, output_filename, tickers):
         "ask_size": pa.int32(),
         "bid_exchange": pa.int16(),
         "bid_price": pa.float32(),
-        "bid_size": pa.int32()
+        "bid_size": pa.int32(),
     }
-    
-    # Build an initial regex pattern to filter tickers.
-    # Matches tickers starting with "O:" followed by one of the specified tickers.
-    # Use a non-capturing group here to avoid issues.
-    pattern = f"^O:(?:{'|'.join(tickers)})"
-    
-    writer = None
-    total_filtered_rows = 0
 
-    with gzip.open(input_filename, 'rb') as f:
+    temp_dir = os.path.join(date_dir, ".parts")
+    os.makedirs(temp_dir, exist_ok=True)
+
+    part_counts = {}
+    chunk_buffers = {}
+    chunk_total = 0
+
+    with gzip.open(input_filename, "rb") as f:
         try:
             reader = pacsv.open_csv(
                 f,
-                convert_options=pacsv.ConvertOptions(column_types=column_types)
+                read_options=pacsv.ReadOptions(block_size=1 << 26),  # 64MB
+                convert_options=pacsv.ConvertOptions(column_types=column_types),
             )
         except pa.ArrowInvalid as e:
             if "Empty CSV file" in str(e):
                 print(f"Skipping empty file: {input_filename}")
                 return
-            else:
-                raise
+            raise
 
-        # Process record batches one at a time.
         for batch in reader:
-            # Apply initial filter on the 'ticker' column.
-            mask = pc.match_substring_regex(batch.column("ticker"), pattern)
-            filtered_batch = batch.filter(mask)
-            if filtered_batch.num_rows == 0:
+            parsed = pc.extract_regex(batch.column("ticker"), TICKER_PATTERN)
+
+            valid_mask = pc.is_valid(parsed.field("underlying"))
+            batch = batch.filter(valid_mask)
+            parsed = parsed.filter(valid_mask)
+            if batch.num_rows == 0:
                 continue
 
-            # --- Ticker Parsing ---
-            # The original ticker format is: O:<UNDERLYING><expiry><C/P><strike>
-            # Example: "O:AAPL210917C00145000" should yield:
-            # underlying: "AAPL", expiry: 210917, opt_type: "C", strike: 145.0
+            underlying_col = parsed.field("underlying")
+            table = pa.table({
+                "expiry": pc.cast(parsed.field("expiry"), pa.int32()),
+                "type": parsed.field("type"),
+                "strike": pc.divide(
+                    pc.cast(parsed.field("strike"), pa.float64()), 1000.0
+                ),
+                "sip_timestamp": pc.cast(
+                    batch.column("sip_timestamp"), pa.timestamp("ns", tz="America/New_York")
+                ),
+                "ask_exchange": batch.column("ask_exchange"),
+                "ask_price": batch.column("ask_price"),
+                "ask_size": batch.column("ask_size"),
+                "bid_exchange": batch.column("bid_exchange"),
+                "bid_price": batch.column("bid_price"),
+                "bid_size": batch.column("bid_size"),
+            })
 
-            # Use named capture groups as required by PyArrow.
-            underlying = pc.extract_regex(filtered_batch.column("ticker"), r"O:(?P<underlying>[A-Z]+)")
-            expiry_str = pc.extract_regex(filtered_batch.column("ticker"), r"O:[A-Z]+(?P<expiry>\d{6})")
-            opt_type = pc.extract_regex(filtered_batch.column("ticker"), r"O:[A-Z]+\d{6}(?P<opt_type>[CP])")
-            strike_str = pc.extract_regex(filtered_batch.column("ticker"), r"O:[A-Z]+\d{6}[CP](?P<strike>\d{8})")
-            
-            # Convert expiry to int32.
-            expiry = pc.cast(expiry_str, pa.int32())
-            # Convert strike to int32, then divide by 1000 and cast to float32.
-            strike_int = pc.cast(strike_str, pa.int32())
-            strike = pc.divide(strike_int, 1000.0)
-            strike = pc.cast(strike, pa.float32())
+            for u in pc.unique(underlying_col).to_pylist():
+                mask = pc.equal(underlying_col, u)
+                subset = table.filter(mask)
+                chunk_buffers.setdefault(u, []).append(subset)
+                chunk_total += subset.num_rows
 
-            # --- Build a new table with parsed ticker columns and other fields ---
-            other_cols = ["sip_timestamp", "ask_exchange", "ask_price", "ask_size",
-                          "bid_exchange", "bid_price", "bid_size"]
-            cols = [
-                ("underlying", underlying),
-                ("expiry", expiry),
-                ("opt_type", opt_type),
-                ("strike", strike)
-            ]
-            for col in other_cols:
-                cols.append((col, filtered_batch.column(col)))
-            
-            new_table = pa.Table.from_arrays(
-                [col for _, col in cols],
-                names=[name for name, _ in cols]
+            if chunk_total >= CHUNK_ROWS:
+                for u, tables in chunk_buffers.items():
+                    combined = pa.concat_tables(tables)
+                    part_num = part_counts.get(u, 0)
+                    pq.write_table(
+                        combined,
+                        os.path.join(temp_dir, f"{u}-{part_num:06d}.parquet"),
+                        compression="snappy",
+                    )
+                    part_counts[u] = part_num + 1
+                chunk_buffers = {}
+                chunk_total = 0
+
+        # flush remaining
+        for u, tables in chunk_buffers.items():
+            combined = pa.concat_tables(tables)
+            part_num = part_counts.get(u, 0)
+            pq.write_table(
+                combined,
+                os.path.join(temp_dir, f"{u}-{part_num:06d}.parquet"),
+                compression="snappy",
             )
-            
-            if writer is None:
-                writer = pq.ParquetWriter(output_filename, new_table.schema)
-            writer.write_table(new_table)
-            total_filtered_rows += new_table.num_rows
+            part_counts[u] = part_num + 1
 
-    if writer is not None:
-        writer.close()
-        print(f"Saved {output_filename} with {total_filtered_rows} rows.")
-    else:
-        print(f"No matching rows found in {input_filename}.")
+    # merge parts per underlying: read all parts, sort, write final file
+    for u in tqdm(sorted(part_counts.keys()), desc="  Merging", unit="sym"):
+        parts = sorted(glob(os.path.join(temp_dir, f"{u}-*.parquet")))
+        table = pa.concat_tables([pq.read_table(p) for p in parts])
+        table = table.take(
+            pc.sort_indices(table, sort_keys=[("sip_timestamp", "ascending")])
+        )
+        output_file = os.path.join(date_dir, f"{base_name}-{u}.parquet")
+        pq.write_table(table, output_file, compression="snappy")
+        print(f"  {u}: {table.num_rows} rows")
+
+    shutil.rmtree(temp_dir)
+
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Stream gzipped CSV files with PyArrow, parse tickers, and write to Parquet."
+        description="Stream-convert option quote CSV.gz files to per-underlying Parquet files."
     )
-    parser.add_argument("in_dir", type=str, help="Directory containing input CSV.gz files.")
-    parser.add_argument("out_dir", type=str, help="Directory to store output Parquet files.")
-    parser.add_argument(
-        "--tickers",
-        type=str,
-        default="SPX,SPXW,VIX,VIXW,XSP,XSPW,SPXL,QQQ,TQQQ,SQQQ,NVDA,TSM,AAPL,MSFT,AMZN,META,TSLA,FBTC,IBIT,BITO,BITX,MSTR",
-        help="Comma-separated list of tickers to filter on (e.g., 'SPX,VIX,AAPL')."
-    )
+    parser.add_argument("input_dir", type=str)
+    parser.add_argument("output_dir", type=str)
     args = parser.parse_args()
 
-    tickers_list = args.tickers.split(",")
-    os.makedirs(args.out_dir, exist_ok=True)
-    csv_files = sorted(glob.glob(os.path.join(args.in_dir, "*.csv.gz")))
+    os.makedirs(args.output_dir, exist_ok=True)
+    csv_files = sorted(glob(os.path.join(args.input_dir, "*.csv.gz")))
 
-    for csv_file in tqdm(csv_files, desc="Processing files"):
-        base_name = os.path.basename(csv_file).split('.')[0]
-        output_filename = os.path.join(args.out_dir, f"{base_name}.parquet")
-        process_file(csv_file, output_filename, tickers_list)
+    for file in tqdm(sorted(csv_files, reverse=True), desc="Processing files", unit="file"):
+        base_name = os.path.basename(file).replace(".csv.gz", "")
+        date_dir = os.path.join(args.output_dir, base_name)
+        os.makedirs(date_dir, exist_ok=True)
+
+        if os.path.exists(date_dir) and len(os.listdir(date_dir)) > 100:
+            print(f"output dir {date_dir} exists, skipping")
+            continue
+
+        print(f"processing {file}")
+        process_file(file, date_dir, base_name)
+
+    print(f"Processing complete. Parquet files saved in {args.output_dir}")
+
 
 if __name__ == "__main__":
     main()
-
