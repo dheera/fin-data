@@ -40,7 +40,7 @@ def aggregate_symbol(quote_path, trade_path, ticker, interval):
     return frame
 
 
-def process_date(date_path, trades_root, output_root, interval, compression, force):
+def process_date(date_path, trades_root, output_root, interval, compression, force, symbol_workers):
     quote_dir = Path(date_path)
     date = quote_dir.name
     output = Path(output_root) / f"{date}.parquet"
@@ -59,19 +59,27 @@ def process_date(date_path, trades_root, output_root, interval, compression, for
     temporary = output.with_suffix(".parquet.tmp")
     writer, rows = None, 0
     try:
-        for quote, trade, ticker in inputs:
-            try:
-                frame = aggregate_symbol(quote, trade, ticker, interval)
-            except Exception as exc:
-                print(f"{date} {ticker}: {exc}", flush=True)
-                continue
-            if frame is None or frame.empty:
-                continue
-            table = pa.Table.from_pandas(frame, preserve_index=False)
-            if writer is None:
-                writer = pq.ParquetWriter(temporary, table.schema, compression=compression)
-            writer.write_table(table)
-            rows += len(frame)
+        # Threads let Arrow/Pandas read and aggregate several symbols at once,
+        # while this process remains the sole writer of the date-level file.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=symbol_workers) as pool:
+            futures = {
+                pool.submit(aggregate_symbol, quote, trade, ticker, interval): ticker
+                for quote, trade, ticker in inputs
+            }
+            for future in concurrent.futures.as_completed(futures):
+                ticker = futures[future]
+                try:
+                    frame = future.result()
+                except Exception as exc:
+                    print(f"{date} {ticker}: {exc}", flush=True)
+                    continue
+                if frame is None or frame.empty:
+                    continue
+                table = pa.Table.from_pandas(frame, preserve_index=False)
+                if writer is None:
+                    writer = pq.ParquetWriter(temporary, table.schema, compression=compression)
+                writer.write_table(table)
+                rows += len(frame)
     finally:
         if writer is not None:
             writer.close()
@@ -89,6 +97,8 @@ def main():
     parser.add_argument("--output-dir", default="us_stocks_sip/tq_aggs")
     parser.add_argument("--interval", type=int, default=10)
     parser.add_argument("--workers", type=int, default=4)
+    parser.add_argument("--symbol-workers", type=int, default=4,
+                        help="Concurrent symbol reads within each date worker")
     parser.add_argument("--days", type=int)
     parser.add_argument("--start-date")
     parser.add_argument("--end-date")
@@ -106,7 +116,8 @@ def main():
         dates = dates[:args.days]
     with concurrent.futures.ProcessPoolExecutor(max_workers=args.workers) as executor:
         futures = [executor.submit(process_date, date, args.trades_dir, args.output_dir,
-                                   f"{args.interval}s", args.compression, args.force)
+                                   f"{args.interval}s", args.compression, args.force,
+                                   args.symbol_workers)
                    for date in dates]
         for future in concurrent.futures.as_completed(futures):
             date, status, rows = future.result()
