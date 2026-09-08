@@ -112,6 +112,26 @@ printf 'Source: %s\nDestination: %s\nMode: %s\n' "$SOURCE" "$DESTINATION" "$([[ 
 printf 'Retention: stocks=%sy futures=%sy forex=%sy crypto=%sy other=%sy options=%sm; full aggregates=%s\n' \
     "$STOCKS_YEARS" "$FUTURES_YEARS" "$FOREX_YEARS" "$CRYPTO_YEARS" "$OTHER_YEARS" "$OPTIONS_MONTHS" "$FULL_AGGREGATES"
 
+if (( PRUNE )); then
+    # Reclaim expired raw partitions before copying aggregate files.  This is
+    # essential on a nearly-full SSD and cannot affect aggregate directories.
+    while IFS= read -r -d '' dated; do
+        rel=${dated#"$DESTINATION"/}
+        [[ "$rel" == *aggs* ]] && continue
+        day=${rel##*/}
+        cutoff=$(cutoff_for "$rel")
+        if [[ "$day" < "$cutoff" || ! -d "$SOURCE/$rel" ]]; then
+            if (( APPLY )); then
+                printf 'Pruning %s\n' "$dated"
+                rm -rf -- "$dated"
+            else
+                printf 'Would prune %s\n' "$dated"
+            fi
+        fi
+    done < <(find "$DESTINATION" -mindepth 3 -maxdepth 3 -type d -regextype posix-extended \
+        -regex '.*/20[0-9]{2}-[01][0-9]-[0-3][0-9]' -print0 | sort -z)
+fi
+
 # Aggregate outputs are compact enough to keep in full.  Limiting the search
 # to two levels avoids walking the contents of multi-terabyte data directories.
 if [[ "$FULL_AGGREGATES" == 1 ]]; then
@@ -136,24 +156,6 @@ while IFS= read -r -d '' dated; do
     sync_dir "$rel"
 done < <(find "$SOURCE" -mindepth 3 -maxdepth 3 -type d -regextype posix-extended \
     -regex '.*/20[0-9]{2}-[01][0-9]-[0-3][0-9]' -print0 | sort -z)
-
-if (( PRUNE )); then
-    while IFS= read -r -d '' dated; do
-        rel=${dated#"$DESTINATION"/}
-        [[ "$rel" == *aggs* ]] && continue
-        day=${rel##*/}
-        cutoff=$(cutoff_for "$rel")
-        if [[ "$day" < "$cutoff" || ! -d "$SOURCE/$rel" ]]; then
-            if (( APPLY )); then
-                printf 'Pruning %s\n' "$dated"
-                rm -rf -- "$dated"
-            else
-                printf 'Would prune %s\n' "$dated"
-            fi
-        fi
-    done < <(find "$DESTINATION" -mindepth 3 -maxdepth 3 -type d -regextype posix-extended \
-        -regex '.*/20[0-9]{2}-[01][0-9]-[0-3][0-9]' -print0 | sort -z)
-fi
 
 printf 'Finished. Local filesystem:\n'
 df -h "$DESTINATION"
