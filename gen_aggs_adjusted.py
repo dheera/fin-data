@@ -110,6 +110,13 @@ def to_ny_normalized(series):
     """
     series = pd.to_datetime(series)
     if series.dt.tz is None:
+        # Calendar dates (splits.execution_date, dividends.ex_dividend_date) are legitimately
+        # naive and all midnight - localizing those is fine. Warn only for naive values with an
+        # intraday component, which are instants whose timezone was lost: assuming New York for
+        # those silently shifts them (see fix/fix_timezones.py).
+        if (series != series.dt.floor("D")).any():
+            print("WARNING: to_ny_normalized(): naive intraday timestamps, assuming "
+                  "America/New_York wall clock; normalize with ./fix/fix_timezones.py if they are UTC")
         series = series.dt.tz_localize("America/New_York")
     else:
         series = series.dt.tz_convert("America/New_York")
@@ -210,10 +217,43 @@ def adjust_aggs_common(aggs: pd.DataFrame, splits: pd.DataFrame, dividends: pd.D
 # Ensure adjust_aggs_common is imported or defined in this module.
 # from your_module import adjust_aggs_common
 
-def process_ticker(file, splits_dir, dividends_dir, output_dir):
+def load_split_div_groups(splits_file, dividends_file):
     """
-    Process one ticker file: load aggregate data, adjust for splits and dividends,
-    then write the adjusted data to the output directory.
+    Build per-ticker splits/dividends lookups from the single combined parquet files
+    (us_stocks_sip/splits.parquet, dividends.parquet) -- which is what the pipeline
+    (download_splits.py / download_dividends.py) actually produces. These files are
+    MultiIndexed by (ticker, <date>); reset_index turns the index levels into columns.
+
+    Returns (splits_groups, dividends_groups), each dict[ticker] -> DataFrame with the
+    columns adjust_aggs_common needs (splits: execution_date, split_from, split_to;
+    dividends: ex_dividend_date, cash_amount).
+    """
+    splits_groups, dividends_groups = {}, {}
+
+    if Path(splits_file).exists():
+        sp = pd.read_parquet(splits_file).reset_index()
+        if "ticker" in sp.columns:
+            for tk, g in sp.groupby("ticker"):
+                splits_groups[str(tk)] = g[["execution_date", "split_from", "split_to"]]
+    else:
+        print(f"WARNING: splits file not found: {splits_file} -- prices will be split-UNadjusted")
+
+    if Path(dividends_file).exists():
+        dv = pd.read_parquet(dividends_file).reset_index()
+        if "ticker" in dv.columns:
+            for tk, g in dv.groupby("ticker"):
+                dividends_groups[str(tk)] = g[["ex_dividend_date", "cash_amount"]]
+    else:
+        print(f"WARNING: dividends file not found: {dividends_file} -- prices will be div-UNadjusted")
+
+    return splits_groups, dividends_groups
+
+
+def process_ticker(file, splits, dividends, output_dir):
+    """
+    Process one ticker file: adjust pre-loaded aggregate data for the given splits and
+    dividends frames, then write the adjusted data to the output directory.
+    `splits` / `dividends` are per-ticker DataFrames (possibly empty).
     """
     ticker = file.stem
     result = f"Processing ticker: {ticker}\n"
@@ -222,30 +262,9 @@ def process_ticker(file, splits_dir, dividends_dir, output_dir):
     except Exception as e:
         return f"Error reading {file}: {e}\n"
 
-    # Load splits for this ticker.
-    splits_file = splits_dir / f"{ticker}.parquet"
-    if splits_file.exists():
-        try:
-            splits = pd.read_parquet(splits_file)
-        except Exception as e:
-            result += f"Error reading splits {splits_file}: {e}\n"
-            splits = pd.DataFrame(columns=["execution_date", "split_from", "split_to"])
-        if splits.empty:
-            splits = pd.DataFrame(columns=["execution_date", "split_from", "split_to"])
-    else:
+    if splits is None or splits.empty:
         splits = pd.DataFrame(columns=["execution_date", "split_from", "split_to"])
-
-    # Load dividends for this ticker.
-    dividends_file = dividends_dir / f"{ticker}.parquet"
-    if dividends_file.exists():
-        try:
-            dividends = pd.read_parquet(dividends_file)
-        except Exception as e:
-            result += f"Error reading dividends {dividends_file}: {e}\n"
-            dividends = pd.DataFrame(columns=["ex_dividend_date", "cash_amount"])
-        if dividends.empty:
-            dividends = pd.DataFrame(columns=["ex_dividend_date", "cash_amount"])
-    else:
+    if dividends is None or dividends.empty:
         dividends = pd.DataFrame(columns=["ex_dividend_date", "cash_amount"])
 
     try:
@@ -273,10 +292,10 @@ def main():
                         help="Input directory for aggregate files (default depends on agg_type).")
     parser.add_argument("--output_dir", type=str, default=None,
                         help="Output directory for adjusted files (default depends on agg_type).")
-    parser.add_argument("--splits_dir", type=str, default="us_stocks_sip/splits_by_ticker",
-                        help="Directory containing splits files (default: us_stocks_sip/splits_by_ticker).")
-    parser.add_argument("--dividends_dir", type=str, default="us_stocks_sip/dividends_by_ticker",
-                        help="Directory containing dividends files (default: us_stocks_sip/dividends_by_ticker).")
+    parser.add_argument("--splits_file", type=str, default="us_stocks_sip/splits.parquet",
+                        help="Combined splits parquet (default: us_stocks_sip/splits.parquet).")
+    parser.add_argument("--dividends_file", type=str, default="us_stocks_sip/dividends.parquet",
+                        help="Combined dividends parquet (default: us_stocks_sip/dividends.parquet).")
     parser.add_argument("--workers", type=int, default=4,
                         help="Number of worker processes to use (default: 4)")
     args = parser.parse_args()
@@ -289,8 +308,6 @@ def main():
         input_dir = Path(args.input_dir) if args.input_dir else base_dir / "minute_aggs_by_ticker"
         output_dir = Path(args.output_dir) if args.output_dir else base_dir / "adjusted_minute_aggs_by_ticker"
 
-    splits_dir = Path(args.splits_dir)
-    dividends_dir = Path(args.dividends_dir)
     output_dir.mkdir(exist_ok=True, parents=True)
 
     files = list(input_dir.glob("*.parquet"))
@@ -298,10 +315,23 @@ def main():
         print("No files found in", input_dir)
         return
 
-    # Process each ticker file concurrently.
+    # Load splits/dividends once from the single combined parquet files and group by ticker.
+    print("Loading splits/dividends ...")
+    splits_groups, dividends_groups = load_split_div_groups(args.splits_file, args.dividends_file)
+    print(f"Loaded splits for {len(splits_groups)} tickers, dividends for {len(dividends_groups)} tickers.")
+
+    empty = pd.DataFrame()
+
+    # Process each ticker file concurrently, passing its pre-loaded splits/dividends.
     with concurrent.futures.ProcessPoolExecutor(max_workers=args.workers) as executor:
         futures = [
-            executor.submit(process_ticker, file, splits_dir, dividends_dir, output_dir)
+            executor.submit(
+                process_ticker,
+                file,
+                splits_groups.get(file.stem, empty),
+                dividends_groups.get(file.stem, empty),
+                output_dir,
+            )
             for file in files
         ]
         for future in concurrent.futures.as_completed(futures):

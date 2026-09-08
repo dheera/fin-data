@@ -4,10 +4,12 @@ import argparse
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pyarrow.dataset as ds
 from glob import glob
 from tqdm import tqdm
 from datetime import datetime, timedelta
 import concurrent.futures
+from functools import partial
 
 # New York timezone identifier
 NY_TZ = "America/New_York"
@@ -37,25 +39,6 @@ def get_recent_files(input_dir, period_days=365):
     recent_files.sort(key=lambda f: datetime.strptime(os.path.basename(f).replace(".parquet", ""), "%Y-%m-%d"))
     return recent_files
 
-def get_files_by_date_range(input_dir, start_date, end_date):
-    """
-    Finds all Parquet files in input_dir whose filenames follow the "YYYY-MM-DD.parquet" format,
-    and returns a chronologically sorted list of files whose dates fall between start_date and end_date (inclusive).
-    """
-    all_files = glob(os.path.join(input_dir, "*.parquet"))
-    files_with_date = []
-    for file in all_files:
-        basename = os.path.basename(file)
-        date_str = basename.replace(".parquet", "")
-        try:
-            file_date = datetime.strptime(date_str, "%Y-%m-%d").date()
-            files_with_date.append((file, file_date))
-        except Exception:
-            print(f"Skipping file {file}: cannot parse date from filename.")
-    selected_files = [file for file, file_date in files_with_date if start_date <= file_date <= end_date]
-    selected_files.sort(key=lambda f: datetime.strptime(os.path.basename(f).replace(".parquet", ""), "%Y-%m-%d"))
-    return selected_files
-
 def get_latest_window_starts(output_dir):
     """
     For each per-ticker Parquet file in output_dir, read its index (assumed to be 'window_start')
@@ -75,23 +58,28 @@ def get_latest_window_starts(output_dir):
             latest_windows[ticker] = df.index.max()
     return latest_windows
 
-def read_file(file):
+def read_file(file, tickers=None):
     """
     Reads a Parquet file and ensures that the DataFrame is indexed by ['ticker', 'window_start'].
+    If a list of tickers is provided, only rows corresponding to those tickers are read from the file,
+    reducing memory usage.
     Handles cases where the file already has window_start as the index with ticker as a column.
     Also converts the 'window_start' timestamps to New York time.
     """
     try:
-        df = pd.read_parquet(file)
+        if tickers is not None:
+            # Use PyArrow dataset API to filter rows by the specified tickers
+            dataset = ds.dataset(file, format="parquet")
+            table = dataset.to_table(filter=ds.field("ticker").isin(tickers))
+            df = table.to_pandas()
+        else:
+            df = pd.read_parquet(file)
+        
         # Case 1: Already a MultiIndex with both 'ticker' and 'window_start'
         if isinstance(df.index, pd.MultiIndex) and set(["ticker", "window_start"]).issubset(df.index.names):
             win_vals = df.index.get_level_values("window_start")
             if win_vals.tz is None:
-                # WARNING: naive input is ASSUMED to be wall-clock New York. If it is
-                # really UTC (as us_indices/day_aggs was before 2025-02-10) this shifts
-                # every bar by 4-5 hours. Normalize the source first, e.g.
-                #   ./fix/fix_timezones.py <dir> --to America/New_York --naive-is UTC
-                print(f"WARNING: {file}: naive window_start, assuming {NY_TZ} wall clock")
+                print(f"WARNING: {file}: naive window_start, assuming {NY_TZ} wall clock; see fix/fix_timezones.py")
                 win_vals = pd.to_datetime(win_vals).tz_localize(NY_TZ, ambiguous='infer', nonexistent='shift_forward')
             else:
                 win_vals = win_vals.tz_convert(NY_TZ)
@@ -103,12 +91,12 @@ def read_file(file):
             # If the index is named "window_start" and "ticker" is a column, reset it.
             if df.index.name == "window_start" and "ticker" in df.columns:
                 df = df.reset_index()
-            # Now ensure both 'ticker' and 'window_start' are present as columns.
+            # Ensure both 'ticker' and 'window_start' are present as columns.
             if "ticker" not in df.columns or "window_start" not in df.columns:
                 raise KeyError("Missing required columns 'ticker' and/or 'window_start'")
             df["window_start"] = pd.to_datetime(df["window_start"])
             if df["window_start"].dt.tz is None:
-                print(f"WARNING: {file}: naive window_start, assuming {NY_TZ} wall clock")
+                print(f"WARNING: {file}: naive window_start, assuming {NY_TZ} wall clock; see fix/fix_timezones.py")
                 df["window_start"] = df["window_start"].dt.tz_localize(NY_TZ, ambiguous='infer', nonexistent='shift_forward')
             else:
                 df["window_start"] = df["window_start"].dt.tz_convert(NY_TZ)
@@ -152,37 +140,32 @@ def process_ticker(task):
     pq.write_table(table, output_path, compression="snappy")
     return ticker
 
-def process_aggs(input_dir, output_dir, agg_type="day", period_days=365, start_date=None, end_date=None):
+def process_aggs(input_dir, output_dir, agg_type="day", period_days=365, tickers=None):
     """
     Process aggregate Parquet files (day or minute) by:
-      - Selecting files within a specified date range or recent period
-      - Reading all files concurrently into memory with a process pool (using tqdm)
-      - Converting all 'window_start' timestamps to New York time
+      - Selecting recent files (based on period_days)
+      - Reading all files concurrently into memory with a process pool (using tqdm), 
+        optionally filtering by tickers to reduce memory usage.
+      - Converting all 'window_start' timestamps to New York time.
       - Concatenating all data and grouping by ticker, then
       - For each ticker, appending only new rows (based on 'window_start') to each ticker's output file,
         processing these groups concurrently.
+      
+    Parameters:
+      tickers: Optional list of tickers to process. If None, all tickers are processed.
     """
     os.makedirs(output_dir, exist_ok=True)
-    
-    if start_date and end_date:
-        try:
-            start_date_obj = datetime.strptime(start_date, "%Y-%m-%d").date()
-            end_date_obj = datetime.strptime(end_date, "%Y-%m-%d").date()
-        except Exception as e:
-            print(f"Error parsing start_date or end_date: {e}")
-            return
-        selected_files = get_files_by_date_range(input_dir, start_date_obj, end_date_obj)
-    else:
-        selected_files = get_recent_files(input_dir, period_days=period_days)
-
-    if not selected_files:
-        print("No files found in the specified date range or period in the input directory.")
+    recent_files = get_recent_files(input_dir, period_days=period_days)
+    if not recent_files:
+        print("No recent files found in the input directory.")
         return
 
     print("Reading all Parquet files concurrently...")
+    # Wrap read_file to pass the tickers filter to each call
+    read_file_partial = partial(read_file, tickers=tickers)
     with concurrent.futures.ProcessPoolExecutor() as executor:
-        dfs = list(tqdm(executor.map(read_file, selected_files),
-                        total=len(selected_files),
+        dfs = list(tqdm(executor.map(read_file_partial, recent_files),
+                        total=len(recent_files),
                         desc="Reading Parquet Files"))
     # Filter out any failed reads
     dfs = [df for df in dfs if df is not None]
@@ -197,9 +180,11 @@ def process_aggs(input_dir, output_dir, agg_type="day", period_days=365, start_d
     # Get the latest window_start per ticker from existing output files
     latest_windows = get_latest_window_starts(output_dir)
 
-    # Prepare tasks for each ticker group
+    # Prepare tasks for each ticker group, filtering by the specified tickers if provided
     ticker_tasks = []
     for ticker, group in all_df.groupby(level=0):
+        if tickers is not None and ticker not in tickers:
+            continue
         lw = latest_windows.get(ticker, None)
         ticker_tasks.append((ticker, group, output_dir, lw))
 
@@ -212,32 +197,20 @@ def process_aggs(input_dir, output_dir, agg_type="day", period_days=365, start_d
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Concatenate daily aggregate (day or minute) Parquet files into per-ticker files for a specified period or date range."
+        description="Concatenate daily aggregate (day or minute) Parquet files into per-ticker files for a specified period."
     )
     parser.add_argument("input_dir", type=str,
-                        help="Path to the input directory containing aggregate Parquet files.")
+                        help="Path to the input directory containing daily aggregate Parquet files.")
     parser.add_argument("output_dir", type=str,
                         help="Path to the output directory for per-ticker aggregate Parquet files.")
     parser.add_argument("--agg_type", type=str, choices=["day", "minute"], default="day",
                         help="Type of aggregation files to process (day or minute). Default is day.")
-    # Optional mutually exclusive date range or recent_days
-    parser.add_argument("--recent_days", type=int,
-                        help="Number of recent days to include (e.g., 730).")
-    parser.add_argument("--start_date", type=str,
-                        help="Start date in YYYY-MM-DD format.")
-    parser.add_argument("--end_date", type=str,
-                        help="End date in YYYY-MM-DD format.")
-
+    parser.add_argument("--period_days", type=int, default=730,
+                        help="Number of days to include (default: 730).")
+    parser.add_argument("--tickers", type=str, nargs="*", default=None,
+                        help="List of tickers to process. If not provided, all tickers will be processed.")
     args = parser.parse_args()
 
-    # Validate that either recent_days is provided or both start_date and end_date are provided (or none, in which case default is used)
-    if args.recent_days is not None and (args.start_date or args.end_date):
-        parser.error("Specify either --recent_days OR --start_date and --end_date, not both.")
-    if (args.start_date and not args.end_date) or (args.end_date and not args.start_date):
-        parser.error("Both --start_date and --end_date must be provided together.")
-    # Set default recent_days if none is provided and no date range is provided
-    period_days = args.recent_days if args.recent_days is not None else 730
-
-    process_aggs(args.input_dir, args.output_dir, agg_type=args.agg_type, period_days=period_days,
-                 start_date=args.start_date, end_date=args.end_date)
+    process_aggs(args.input_dir, args.output_dir, agg_type=args.agg_type,
+                 period_days=args.period_days, tickers=args.tickers)
 

@@ -46,6 +46,7 @@ def read_file(file):
         if isinstance(df.index, pd.MultiIndex) and set(["ticker", "window_start"]).issubset(df.index.names):
             win = df.index.get_level_values("window_start")
             if win.tz is None:
+                print(f"WARNING: {file}: naive window_start, assuming {NY_TZ} wall clock; see fix/fix_timezones.py")
                 win = pd.to_datetime(win).tz_localize(NY_TZ, ambiguous="infer", nonexistent="shift_forward")
             else:
                 win = win.tz_convert(NY_TZ)
@@ -59,6 +60,7 @@ def read_file(file):
                 return None
             df["window_start"] = pd.to_datetime(df["window_start"])
             if df["window_start"].dt.tz is None:
+                print(f"WARNING: {file}: naive window_start, assuming {NY_TZ} wall clock; see fix/fix_timezones.py")
                 df["window_start"] = df["window_start"].dt.tz_localize(NY_TZ, ambiguous="infer", nonexistent="shift_forward")
             else:
                 df["window_start"] = df["window_start"].dt.tz_convert(NY_TZ)

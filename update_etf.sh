@@ -1,0 +1,4 @@
+#!/bin/bash
+
+./download_etf_holdings.py BND DIA IJH IJR IVV IWF IWM MSTU MSTX QQQ RSP SMH SOXX SPXL SQQQ TQQQ VO VOO VTI VUG XLG
+

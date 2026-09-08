@@ -29,11 +29,13 @@ def compute_regression_constants():
     spx.index = pd.to_datetime(spx.index)
     
     if spy.index.tz is None:
+        print(f"WARNING: spy has naive timestamps, assuming {NY_TZ} wall clock")
         spy.index = spy.index.tz_localize(NY_TZ)
     else:
         spy.index = spy.index.tz_convert(NY_TZ)
         
     if spx.index.tz is None:
+        print(f"WARNING: spx has naive timestamps, assuming {NY_TZ} wall clock")
         spx.index = spx.index.tz_localize(NY_TZ)
     else:
         spx.index = spx.index.tz_convert(NY_TZ)

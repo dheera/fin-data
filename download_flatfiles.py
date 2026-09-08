@@ -2,6 +2,7 @@
 import os
 import boto3
 from botocore.config import Config
+from boto3.s3.transfer import TransferConfig
 import time
 import json
 
@@ -20,6 +21,11 @@ s3 = session.client(
 )
 
 bucket_name = config["s3_bucket"]
+
+# Polygon serves ~2 MB/s per connection, so throughput scales with concurrency:
+# 10 threads (default) ~20 MB/s, 32 ~60 MB/s, 64 ~130 MB/s peak, 128 ~150 MB/s peak
+# on our 2 Gbps link. Diminishing returns past 128.
+transfer_config = TransferConfig(max_concurrency=128)
 
 def download(prefix, year_start = 2021, year_end = 2026):
     to_download = []
@@ -41,11 +47,14 @@ def download(prefix, year_start = 2021, year_end = 2026):
     
         try:
             print(f"Downloading {object_key}")
-            result = s3.download_file(bucket_name, object_key, local_file_path)
+            result = s3.download_file(bucket_name, object_key, local_file_path, Config=transfer_config)
         except Exception as e:
             print(e)
+            if int(e.response.get('Error',{}).get('Code')) == 403:
+                print("403 Unauthorized, ending early")
+                return
             
-        time.sleep(0.5)
+        time.sleep(0.1)
 
 # - 'global_crypto' for global cryptocurrency data
 # - 'global_forex' for global forex data
@@ -53,21 +62,33 @@ def download(prefix, year_start = 2021, year_end = 2026):
 # - 'us_options_opra' for US options (OPRA) data
 # - 'us_stocks_sip' for US stocks (SIP) data
 
-download('us_indices/minute_aggs_v1/', year_start = 2024, year_end = 2027)
-download('us_indices/day_aggs_v1/', year_start = 2024, year_end = 2027)
+year_start = 2026
+year_end = 2027
+market_list = [
+  'us_indices',
+  'global_forex',
+  'global_crypto',
+  'global_forex',
+  'us_stocks_sip',
+  'us_options_opra',
+  'us_futures_cbot',
+  'us_futures_cme',
+  'us_futures_nymex',
+  'us_futures_comex',
+]
+datatype_list = [
+  'minute_aggs_v1',
+  'day_aggs_v1',
+  'quotes_v1',
+  'trades_v1',
+]
 
-download('global_forex/day_aggs_v1/', year_start = 2010, year_end = 2027)
-download('global_forex/minute_aggs_v1/', year_start = 2010, year_end = 2027)
-download('global_crypto/day_aggs_v1/', year_start = 2010, year_end = 2027)
-download('global_crypto/minute_aggs_v1/', year_start = 2010, year_end = 2027)
-download('us_stocks_sip/minute_aggs_v1/', year_start = 2024, year_end = 2027)
-download('us_stocks_sip/day_aggs_v1/', year_start = 2024, year_end = 2027)
-download('us_stocks_sip/quotes_v1/', year_start = 2023, year_end = 2027)
-download('us_stocks_sip/trades_v1/', year_start = 2023, year_end = 2027)
-
-download('us_options_opra/minute_aggs_v1/', year_start = 2024, year_end = 2027)
-download('us_options_opra/day_aggs_v1/', year_start = 2024, year_end = 2027)
-#download('us_options_opra/quotes_v1/', year_start = 2025, year_end = 2026) # huge 100GB files
-download('us_options_opra/trades_v1/', year_start = 2025, year_end = 2027)
-
+for market in market_list:
+    for datatype in datatype_list:
+        try:
+            print(f"*** Fetching {market}/{datatype}/ ***")
+            download(f"{market}/{datatype}/", year_start = year_start, year_end = year_end)
+            time.sleep(0.2)
+        except KeyError:
+            print(f"warning: f{market} does not have {datatype}")
 

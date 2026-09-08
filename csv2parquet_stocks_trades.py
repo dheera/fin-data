@@ -66,7 +66,7 @@ def process_file(input_filename, output_dir):
 
             buffer[current_size] = (
                 int(row['sip_timestamp']), int(row['participant_timestamp']),
-                float(row['price']), int(row['size']), int(row['exchange']),
+                float(row['price']), int(float(row['size'])), int(row['exchange']),
                 int(row['sequence_number']), row['conditions'], int(row['correction']),
                 int(row['id']), int(row['tape']), int(row['trf_id']), int(row['trf_timestamp'])
             )

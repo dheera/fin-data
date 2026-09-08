@@ -1,0 +1,31 @@
+# Local credentials and machine-specific configuration
+alpaca.json
+finnhub.json
+kalshi.json
+kalshi.key
+polygon.json
+.claude/
+
+# Generated/downloaded data and runtime artifacts
+*.parquet
+*.log
+__pycache__/
+*.py[cod]
+*.egg-info/
+_cache/
+
+# Downloaded-data roots (source utilities live at the repository root)
+benzinga/
+etf_global/
+finra_short_volume/
+global_crypto/
+global_forex/
+prediction_markets/
+sec_edgar/
+us_futures_cbot/
+us_futures_cme/
+us_futures_comex/
+us_futures_nymex/
+us_indices/
+us_options_opra/
+us_stocks_sip/

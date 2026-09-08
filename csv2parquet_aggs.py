@@ -64,7 +64,9 @@ class AggDataPreprocessor:
            print("No data lines, skipping: {file}")
            return
         is_options = df.reset_index()['ticker'].iloc[0].startswith("O:")
-        
+        # NOTE: futures flatfiles carry extra columns (exchange, session_end_date,
+        # dollar_volume) and non-"O:" tickers, so they flow through the non-options path.
+
         # Convert timestamp to datetime index
         df['window_start'] = pd.to_datetime(df['window_start'], unit='ns')
         for field in ['open', 'close', 'high', 'low']:
@@ -72,6 +74,10 @@ class AggDataPreprocessor:
         for field in ['volume', 'transactions']:
             if field in df.columns:
                 df[field] = df[field].astype('int32')
+        if 'dollar_volume' in df.columns:
+            df['dollar_volume'] = df['dollar_volume'].astype('float32')
+        if 'exchange' in df.columns:
+            df['exchange'] = df['exchange'].astype('int32')
 
         if self.utc:
             df["window_start"] = pd.to_datetime(df["window_start"], utc=True).dt.tz_convert("UTC")
@@ -89,6 +95,8 @@ class AggDataPreprocessor:
             df.set_index(["underlying", "expiry", "type", "strike", "window_start"], inplace=True)
             df.sort_index(inplace=True)
         else:
+            # futures keep their extra exchange/session_end_date/dollar_volume columns;
+            # stocks/indices/futures all index on [ticker, window_start]
             df.set_index(['ticker', 'window_start'], inplace=True)
             df.sort_index(inplace=True)
 

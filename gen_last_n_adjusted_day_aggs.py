@@ -16,6 +16,13 @@ def to_ny_normalized(series):
     """Convert a datetime series to NY time, normalize to midnight, drop tz."""
     series = pd.to_datetime(series)
     if series.dt.tz is None:
+        # Calendar dates (splits.execution_date, dividends.ex_dividend_date) are legitimately
+        # naive and all midnight - localizing those is fine. Warn only for naive values with an
+        # intraday component, which are instants whose timezone was lost: assuming New York for
+        # those silently shifts them (see fix/fix_timezones.py).
+        if (series != series.dt.floor("D")).any():
+            print(f"WARNING: to_ny_normalized(): naive intraday timestamps, assuming {NY_TZ} "
+                  f"wall clock; normalize with ./fix/fix_timezones.py if they are UTC")
         series = series.dt.tz_localize(NY_TZ)
     else:
         series = series.dt.tz_convert(NY_TZ)

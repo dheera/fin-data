@@ -8,7 +8,7 @@ from glob import glob
 from tqdm import tqdm
 import pytz
 
-def process_option_trades(input_dir, output_dir):
+def process_option_trades(input_dir, output_dir, delete_original=False):
     # Ensure output directory exists
     os.makedirs(output_dir, exist_ok=True)
 
@@ -26,6 +26,10 @@ def process_option_trades(input_dir, output_dir):
 
         if os.path.exists(date_dir) and len(os.listdir(date_dir)) > 3000:
             print(f"output dir {date_dir} exists, skipping")
+            if delete_original:
+                print(f"Deleting original {file}")
+                os.remove(file)
+                open(file, "a").close()
             continue
 
         # Read CSV file
@@ -62,6 +66,11 @@ def process_option_trades(input_dir, output_dir):
             group.set_index(['expiry', 'type', 'strike'], inplace=True)
             group.to_parquet(output_file, engine="pyarrow", compression="snappy")
 
+        if delete_original:
+            print(f"Deleting original {file}")
+            os.remove(file)
+            open(file, "a").close()
+
         # Update progress bar
         progress.update(1)
 
@@ -72,7 +81,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Convert option trade CSV files to per-day cleaned Parquet files.")
     parser.add_argument("input_dir", type=str, help="Path to the input directory containing option trade CSV files.")
     parser.add_argument("output_dir", type=str, help="Path to the output directory for per-day Parquet files.")
+    parser.add_argument("--delete-original", action="store_true", help="Delete original files (default: False)")
 
     args = parser.parse_args()
-    process_option_trades(args.input_dir, args.output_dir)
+    process_option_trades(args.input_dir, args.output_dir, args.delete_original)
 
