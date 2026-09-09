@@ -15,13 +15,14 @@ while pgrep -f '^bash /data.local/fin/sync_fin_cache.sh --apply$' >/dev/null; do
     sleep 60
 done
 
-if [[ -e "$OUTPUT" || -e "$LEGACY" ]]; then
-    echo "migration staging or legacy path already exists; refusing to continue" >&2
+if [[ -e "$LEGACY" ]]; then
+    echo "legacy migration path already exists; refusing to continue" >&2
     exit 1
 fi
 
 echo "$(date --iso-8601=seconds) generating date-level TQ aggregates"
-./gen_stocks_tq_aggs.py --output-dir "$OUTPUT" --workers 4 --force
+find "$OUTPUT" -type f -name '*.tmp' -delete
+./gen_stocks_tq_aggs.py --output-dir "$OUTPUT" --workers 4
 
 source_dates=$(find "$SOURCE/us_stocks_sip/quotes" -mindepth 1 -maxdepth 1 -type d -name '20??-??-??' | wc -l)
 legacy_dates=$(find "$CURRENT" -mindepth 1 -maxdepth 1 -type d -name '20??-??-??' | wc -l)

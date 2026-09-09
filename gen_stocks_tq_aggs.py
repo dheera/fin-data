@@ -37,6 +37,11 @@ def aggregate_symbol(quote_path, trade_path, ticker, interval):
         return None
     frame = frame.loc[valid.idxmax():].reset_index(names="window_start")
     frame.insert(0, "ticker", ticker)
+    # Parquet row groups in a date file must share one schema.  Input feeds
+    # vary between integer and floating sizes/volumes, so normalize all quote
+    # and trade numeric fields before handing frames to the common writer.
+    for column in ("last", "last_size", "volume", "bid", "bid_size", "ask", "ask_size"):
+        frame[column] = frame[column].astype("float64")
     return frame
 
 
