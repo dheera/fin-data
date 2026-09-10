@@ -28,9 +28,13 @@ echo "$(date --iso-8601=seconds) compacting legacy-only TQ dates"
 
 source_dates=$(find "$SOURCE/us_stocks_sip/quotes" -mindepth 1 -maxdepth 1 -type d -name '20??-??-??' | wc -l)
 legacy_dates=$(find "$CURRENT" -mindepth 1 -maxdepth 1 -type d -name '20??-??-??' | wc -l)
+expected_dates=$( {
+    find "$SOURCE/us_stocks_sip/quotes" -mindepth 1 -maxdepth 1 -type d -name '20??-??-??' -printf '%f\n'
+    find "$CURRENT" -mindepth 1 -maxdepth 1 -type d -name '20??-??-??' -printf '%f\n'
+} | sort -u | wc -l)
 output_dates=$(find "$OUTPUT" -mindepth 1 -maxdepth 1 -type f -name '20??-??-??.parquet' | wc -l)
-if (( output_dates != legacy_dates || output_dates > source_dates + legacy_dates )); then
-    echo "validation failed: source_dates=$source_dates legacy_dates=$legacy_dates output_dates=$output_dates" >&2
+if (( output_dates != expected_dates )); then
+    echo "validation failed: source_dates=$source_dates legacy_dates=$legacy_dates expected_dates=$expected_dates output_dates=$output_dates" >&2
     exit 1
 fi
 
