@@ -192,6 +192,51 @@ class Hour:
     provenance: dict
 
 
+def legacy_hour_provenance(manifest, start, end):
+    """Normalize the original direct-hour format without inventing coverage.
+
+    Before hourly assembly, finalized schema-v2 chunks were published directly
+    under the same canonical hourly paths. Only a single canonical first part
+    is accepted here; private minute segments and unmerged parts are not hours.
+    """
+    require(type(manifest.get('part_number')) is int and manifest['part_number'] == 1,
+            'legacy canonical hour must be a single first part')
+    require(all(isinstance(manifest.get(k), str) and manifest[k]
+                for k in ('chunk_id', 'connection_id'))
+            and isinstance(manifest.get('collector'), dict), 'missing legacy collector identity')
+    a, b = manifest.get('coverage_start_ns'), manifest.get('coverage_end_ns')
+    require(type(a) is int and type(b) is int and start <= a <= b <= end,
+            'invalid legacy coverage interval')
+    book_start = manifest.get('book_reconstructible_start_ns')
+    require(book_start is None or (type(book_start) is int and start <= book_start <= end),
+            'invalid legacy book coverage start')
+    gaps, gap_count = manifest.get('gaps'), manifest.get('gap_count')
+    require(isinstance(gaps, list) and type(gap_count) is int and gap_count >= len(gaps),
+            'invalid legacy gap diagnostics')
+    omitted = manifest.get('gap_summary_omitted', gap_count - len(gaps))
+    require(type(omitted) is int and omitted == gap_count - len(gaps),
+            'invalid legacy omitted gap count')
+    result = dict(legacy_manifest=manifest, gap_count=gap_count,
+                  gap_summary_omitted=omitted, gaps=gaps, uncommitted_files=[],
+                  publication_residues=[], seal_sha256=None,
+                  connection_collectors=[{k: manifest[k] for k in ('connection_id', 'collector')}])
+    for field, lower in (('coverage', a),
+                         ('book_coverage', max(a, book_start) if book_start is not None else b)):
+        intervals = [{'start_ns': lower, 'end_ns': b}] if lower < b else []
+        missing = []
+        cursor = start
+        for interval in intervals:
+            if cursor < interval['start_ns']:
+                missing.append({'start_ns': cursor, 'end_ns': interval['start_ns']})
+            cursor = interval['end_ns']
+        if cursor < end:
+            missing.append({'start_ns': cursor, 'end_ns': end})
+        result[field + '_intervals'] = intervals
+        result[field + '_gaps'] = missing
+        result[field + '_complete'] = not missing and gap_count == 0
+    return result
+
+
 def load_hour(client, bucket, prefix, key):
     relative = key.removeprefix(prefix)
     parts = relative.split('/')
@@ -201,7 +246,7 @@ def load_hour(client, bucket, prefix, key):
     start_day = day_ns(day)
     m, sha = read_manifest(client, bucket, key)
     require(isinstance(m, dict) and m.get('status') == 'finalized'
-            and m.get('record_type') == 'hourly_assembly' and m.get('schema_version') == 2,
+            and m.get('record_type') in (None, 'hourly_assembly') and m.get('schema_version') == 2,
             'expected committed schema-v2 canonical hour: ' + key)
     symbol = m.get('symbol', '')
     require(isinstance(symbol, str) and NAME.fullmatch(symbol) and m.get('source') == source,
@@ -230,15 +275,19 @@ def load_hour(client, bucket, prefix, key):
     fields = ('coverage_intervals', 'book_coverage_intervals', 'coverage_gaps', 'book_coverage_gaps',
               'coverage_complete', 'book_coverage_complete', 'gap_count', 'gap_summary_omitted',
               'gaps', 'uncommitted_files', 'publication_residues', 'seal_sha256')
-    provenance = {k: m.get(k) for k in fields}
-    identities = {}
-    for segment in m.get('segments', []):
-        original = segment['manifest']
-        identity = {k: original.get(k) for k in ('connection_id', 'collector')}
-        identities[encoded(identity)] = identity
+    if m.get('record_type') is None:
+        provenance = legacy_hour_provenance(m, start, end)
+    else:
+        provenance = {k: m.get(k) for k in fields}
+        identities = {}
+        for segment in m.get('segments', []):
+            original = segment['manifest']
+            identity = {k: original.get(k) for k in ('connection_id', 'collector')}
+            identities[encoded(identity)] = identity
+        provenance['connection_collectors'] = list(identities.values())
     provenance.update(manifest_key=key, manifest_sha256=sha, book_file=entry,
                       interval_start_ns=start, interval_end_ns=end,
-                      connection_collectors=list(identities.values()))
+                      record_type=m.get('record_type'))
     return Hour(key, sha, source, day, asset, symbol, start, end, entry, metadata,
                 m['analysis_depth'], provenance)
 
@@ -328,8 +377,21 @@ def checked_batches(path, hour, batch_rows, expected_schema):
                     (('source', 'source'), ('symbol', 'symbol'), ('interval_start_ns', 'start_ns'),
                      ('interval_end_ns', 'end_ns'), ('analysis_depth', 'analysis_depth'))),
                 'hourly Parquet metadata mismatch')
-        require(meta.get('record_type') == 'hourly_assembly' and meta.get('metadata') == hour.metadata,
-                'hourly Parquet instrument metadata mismatch')
+        require(meta.get('schema_version') == 2
+                and meta.get('record_type') == hour.provenance['record_type'],
+                'hourly Parquet format mismatch')
+        legacy = hour.provenance.get('legacy_manifest')
+        if legacy is not None:
+            # Direct-hour Parquet footers flatten instrument metadata. Their
+            # `status` is the venue's instrument status, not a commit marker.
+            require(all(k in meta and meta[k] == v for k, v in hour.metadata.items()),
+                    'legacy Parquet instrument metadata mismatch')
+            require(all(meta.get(k) == legacy[k] for k in
+                        ('chunk_id', 'connection_id', 'part_number', 'collector')),
+                    'legacy Parquet collector identity mismatch')
+        else:
+            require(meta.get('metadata') == hour.metadata,
+                    'hourly Parquet instrument metadata mismatch')
         previous = None
         total = 0
         for batch in parquet.iter_batches(batch_size=batch_rows, use_threads=False):
@@ -344,6 +406,11 @@ def checked_batches(path, hour, batch_rows, expected_schema):
                 values = batch.column(column)
                 require(values.null_count == 0 and pc.all(pc.equal(values, expected)).as_py(),
                         'row identity mismatch')
+            if legacy is not None:
+                connections = batch.column('connection_id')
+                require(connections.null_count == 0 and
+                        pc.all(pc.equal(connections, legacy['connection_id'])).as_py(),
+                        'legacy row connection mismatch')
             first_key, last_key = (times[0].as_py(), sequences[0].as_py()), (times[-1].as_py(), sequences[-1].as_py())
             require(previous is None or previous <= first_key, 'unordered hourly row boundary')
             if len(times) > 1:
@@ -411,7 +478,13 @@ def build_day(client, bucket, prefix, output_root, hours, *, batch_rows=32768,
                 writer.close()
     return dict(event='written', path=str(destination), source=first.source, asset=first.asset,
                 day=first.day, hours=len(hours), missing_hours=info['missing_hours'],
-                book_coverage_complete=info['book_coverage_complete'], rows=rows, bytes=size)
+                book_coverage_complete=info['book_coverage_complete'],
+                book_coverage_gap_count=len(info['book_coverage_gaps']),
+                book_uncovered_seconds=sum(g['end_ns'] - g['start_ns']
+                                           for g in info['book_coverage_gaps']) / 1e9,
+                source_gap_count=sum(h.provenance.get('gap_count') or 0 for h in hours),
+                legacy_direct_hours=sum('legacy_manifest' in h.provenance for h in hours),
+                rows=rows, bytes=size)
 
 
 def parse_args(argv=None):

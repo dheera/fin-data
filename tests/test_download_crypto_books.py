@@ -393,3 +393,243 @@ def test_second_hour_connection_error_preserves_old_daily(app, tmp_path):
         build(app, client, tmp_path, loaded(app, client, key0, key1))
     assert destination.read_bytes() == previous
     assert list(destination.parent.iterdir()) == [destination]
+
+
+def save_manifest(client, key, manifest):
+    client.add(key, (json.dumps(manifest, sort_keys=True) + '\n').encode())
+
+
+def rewrite_hour_footer(client, key, footer):
+    """Re-sign a fake object after a footer edit, so integrity checks still pass."""
+    manifest = json.loads(client.objects[key])
+    entry = next(value for value in manifest['files'] if value['table'] == 'books')
+    data_key = 'global_crypto/' + entry['path']
+    table = pq.read_table(io.BytesIO(client.objects[data_key])).replace_schema_metadata({
+        b'btc_book_recorder': json.dumps(footer, sort_keys=True).encode(),
+    })
+    stream = io.BytesIO()
+    pq.write_table(table, stream, compression='zstd', row_group_size=1)
+    blob = stream.getvalue()
+    entry.update(size_bytes=len(blob), sha256=sha(blob))
+    client.add(data_key, blob)
+    save_manifest(client, key, manifest)
+    return manifest, table
+
+
+def add_legacy_hour(client, hour, *, partial=False, **kwargs):
+    """Original direct-hour schema v2: flattened footer, no record_type."""
+    manifest, _, key = add_hour(client, hour, **kwargs)
+    start, end = manifest['interval_start_ns'], manifest['interval_end_ns']
+    for field in ('record_type', 'coverage_intervals', 'book_coverage_intervals',
+                  'coverage_gaps', 'book_coverage_gaps', 'coverage_complete',
+                  'book_coverage_complete', 'uncommitted_files', 'segments'):
+        manifest.pop(field)
+    manifest.update(chunk_id='a' * 32, connection_id='receiver-a', part_number=1,
+                    collector={'hostname': 'original-recorder', 'boot_id': 'boot-a',
+                               'code_sha256': 'b' * 64, 'package_version': '0.1.0',
+                               'started_ns': start - 1000},
+                    connection_started_ns=start + 100_000_000 if partial else start - HOUR_NS,
+                    coverage_start_ns=start + 100_000_000 if partial else start,
+                    coverage_end_ns=end,
+                    book_reconstructible_start_ns=manifest['first_recv_ns'] if partial else start,
+                    partial_start=partial, partial_end=False,
+                    gap_summary_omitted=0, finish_reason='interval_boundary')
+    save_manifest(client, key, manifest)
+    footer = dict(manifest['metadata'])
+    footer.update({field: manifest[field] for field in
+                   ('schema_version', 'source', 'symbol', 'analysis_depth',
+                    'interval_start_ns', 'interval_end_ns', 'chunk_id',
+                    'connection_id', 'part_number', 'collector')})
+    footer['time_basis'] = 'local userspace receipt; half-open UTC interval'
+    manifest, table = rewrite_hour_footer(client, key, footer)
+    return manifest, table, key
+
+
+def test_legacy_initial_partial_hour_retains_provenance_and_exact_rows(app, tmp_path):
+    client = FakeS3()
+    manifest, expected, key = add_legacy_hour(client, 7, partial=True)
+    hour = loaded(app, client, key)[0]
+    assert hour.provenance['legacy_manifest'] == manifest
+    assert hour.provenance['connection_collectors'] == [{
+        'connection_id': manifest['connection_id'], 'collector': manifest['collector']}]
+    assert hour.provenance['coverage_intervals'] == [{
+        'start_ns': manifest['coverage_start_ns'], 'end_ns': manifest['coverage_end_ns']}]
+    assert hour.provenance['book_coverage_intervals'] == [{
+        'start_ns': manifest['book_reconstructible_start_ns'],
+        'end_ns': manifest['coverage_end_ns']}]
+    assert hour.provenance['coverage_gaps'] == [{
+        'start_ns': hour.start_ns, 'end_ns': manifest['coverage_start_ns']}]
+    assert hour.provenance['book_coverage_gaps'] == [{
+        'start_ns': hour.start_ns, 'end_ns': manifest['book_reconstructible_start_ns']}]
+    assert hour.provenance['coverage_complete'] is False
+    assert hour.provenance['book_coverage_complete'] is False
+    result = build(app, client, tmp_path, [hour])
+    exact_table(pq.read_table(output_path(tmp_path)), expected)
+    assert result['legacy_direct_hours'] == 1
+    assert result['book_coverage_complete'] is False
+    saved = json.loads(pq.ParquetFile(output_path(tmp_path)).schema_arrow.metadata[b'btc_book_recorder'])
+    assert saved['hours'][0]['legacy_manifest'] == manifest
+
+
+def test_legacy_full_hour_with_carried_book_is_complete(app, tmp_path):
+    client = FakeS3()
+    _, expected, key = add_legacy_hour(client, 1)
+    hour = loaded(app, client, key)[0]
+    assert hour.provenance['coverage_intervals'] == [{'start_ns': hour.start_ns, 'end_ns': hour.end_ns}]
+    assert hour.provenance['book_coverage_intervals'] == hour.provenance['coverage_intervals']
+    assert hour.provenance['coverage_gaps'] == hour.provenance['book_coverage_gaps'] == []
+    assert hour.provenance['coverage_complete'] is True
+    assert hour.provenance['book_coverage_complete'] is True
+    build(app, client, tmp_path, [hour])
+    exact_table(pq.read_table(output_path(tmp_path)), expected)
+
+
+def test_mixed_legacy_and_assembled_day_preserves_exact_values(app, tmp_path):
+    client = FakeS3()
+    _, legacy, key0 = add_legacy_hour(client, 0, partial=True)
+    _, assembled, key1 = add_hour(client, 1)
+    result = build(app, client, tmp_path, loaded(app, client, key1, key0))
+    exact_table(pq.read_table(output_path(tmp_path)), pa.concat_tables([legacy, assembled]))
+    assert result['rows'] == 4
+    assert result['legacy_direct_hours'] == 1
+    assert result['hours'] == 2
+
+
+@pytest.mark.parametrize('changes', [
+    {'record_type': 'unknown'}, {'record_type': 'daily_books'},
+    {'status': 'open'}, {'schema_version': 1}, {'part_number': 2},
+    {'chunk_id': ''}, {'connection_id': ''}, {'collector': None},
+    {'coverage_start_ns': None}, {'coverage_end_ns': None},
+    {'coverage_start_ns': DAY_NS - 1}, {'coverage_end_ns': DAY_NS + HOUR_NS + 1},
+    {'coverage_start_ns': DAY_NS + HOUR_NS, 'coverage_end_ns': DAY_NS},
+    {'book_reconstructible_start_ns': DAY_NS - 1},
+    {'book_reconstructible_start_ns': DAY_NS + HOUR_NS + 1},
+    {'coverage_start_ns': float(DAY_NS)}, {'gap_count': -1},
+    {'interval_start_ns': DAY_NS + 1, 'interval_end_ns': DAY_NS + HOUR_NS + 1},
+])
+def test_invalid_legacy_manifest_rejected(app, changes):
+    client = FakeS3()
+    manifest, _, key = add_legacy_hour(client, 0)
+    manifest.update(changes)
+    save_manifest(client, key, manifest)
+    with pytest.raises(app.FetchError):
+        loaded(app, client, key)
+
+
+def test_legacy_part_filename_is_not_canonical(app):
+    client = FakeS3()
+    manifest, _, key = add_legacy_hour(client, 0)
+    alternate = key.replace('-0000.manifest.json', '-0000-part02.manifest.json')
+    save_manifest(client, alternate, manifest)
+    with pytest.raises(app.FetchError):
+        loaded(app, client, alternate)
+
+
+@pytest.mark.parametrize('absent', [True, False])
+def test_legacy_without_reconstructible_start_has_unknown_book_coverage(app, absent):
+    client = FakeS3()
+    manifest, _, key = add_legacy_hour(client, 0)
+    if absent:
+        manifest.pop('book_reconstructible_start_ns')
+    else:
+        manifest['book_reconstructible_start_ns'] = None
+    save_manifest(client, key, manifest)
+    hour = loaded(app, client, key)[0]
+    assert hour.provenance['coverage_complete'] is True
+    assert hour.provenance['book_coverage_complete'] is False
+    assert hour.provenance['book_coverage_intervals'] == []
+    assert hour.provenance['book_coverage_gaps'] == [{
+        'start_ns': hour.start_ns, 'end_ns': hour.end_ns}]
+
+
+@pytest.mark.parametrize('field,bad_value', [
+    ('chunk_id', 'c' * 32), ('connection_id', 'other-receiver'),
+    ('part_number', 2), ('collector', {'hostname': 'other-recorder'}),
+    ('schema_version', 1), ('record_type', 'hourly_assembly'),
+    ('size_scale', '1000'),
+])
+def test_tampered_legacy_footer_preserves_existing_daily(app, tmp_path, field, bad_value):
+    client = FakeS3()
+    _, _, key = add_legacy_hour(client, 0)
+    build(app, client, tmp_path, loaded(app, client, key))
+    destination = output_path(tmp_path)
+    previous = destination.read_bytes()
+    data_key = key.replace('.manifest.json', '.parquet')
+    footer = json.loads(pq.ParquetFile(io.BytesIO(client.objects[data_key])).schema_arrow.metadata[b'btc_book_recorder'])
+    footer[field] = bad_value
+    rewrite_hour_footer(client, key, footer)
+    with pytest.raises(app.FetchError):
+        build(app, client, tmp_path, loaded(app, client, key))
+    assert destination.read_bytes() == previous
+    assert list(destination.parent.iterdir()) == [destination]
+
+
+def test_legacy_source_gap_prevents_false_completeness_with_contiguous_coverage(app):
+    client = FakeS3()
+    manifest, _, key = add_legacy_hour(client, 0)
+    manifest.update(gap_count=1, gaps=[{'reason': 'sequence_gap', 'recv_ns': DAY_NS + 10}])
+    save_manifest(client, key, manifest)
+    hour = loaded(app, client, key)[0]
+    assert hour.provenance['coverage_gaps'] == hour.provenance['book_coverage_gaps'] == []
+    assert hour.provenance['coverage_complete'] is False
+    assert hour.provenance['book_coverage_complete'] is False
+    assert hour.provenance['gap_count'] == 1
+    assert hour.provenance['gaps'] == manifest['gaps']
+
+
+def test_all_24_files_with_short_internal_gap_report_gap_duration(app, tmp_path):
+    client = FakeS3()
+    keys = []
+    for hour in range(24):
+        manifest, _, key = add_hour(client, hour)
+        keys.append(key)
+        if hour == 3:
+            start, end = manifest['interval_start_ns'], manifest['interval_end_ns']
+            gap_start = start + HOUR_NS // 2
+            gap_end = gap_start + 2_500_000_000
+            intervals = [{'start_ns': start, 'end_ns': gap_start}, {'start_ns': gap_end, 'end_ns': end}]
+            gaps = [{'start_ns': gap_start, 'end_ns': gap_end}]
+            manifest.update(coverage_intervals=intervals, book_coverage_intervals=intervals,
+                            coverage_gaps=gaps, book_coverage_gaps=gaps,
+                            coverage_complete=False, book_coverage_complete=False,
+                            gap_count=1, gaps=[{'reason': 'transport_closed', 'recv_ns': gap_start}])
+            save_manifest(client, key, manifest)
+    result = build(app, client, tmp_path, loaded(app, client, *keys))
+    assert result['hours'] == 24 and result['missing_hours'] == []
+    assert result['book_coverage_complete'] is False
+    assert result['book_coverage_gap_count'] == 1
+    assert result['book_uncovered_seconds'] == 2.5
+    assert result['source_gap_count'] == 1
+    assert result['legacy_direct_hours'] == 0
+    assert result['rows'] == 48
+
+
+def test_legacy_book_coverage_cannot_precede_transport_coverage(app):
+    client = FakeS3()
+    manifest, _, key = add_legacy_hour(client, 0)
+    manifest['coverage_start_ns'] = DAY_NS + 100
+    # A carried book's state may predate renewed transport coverage. Only the
+    # intersection is covered; never extend coverage backward from book state.
+    manifest['book_reconstructible_start_ns'] = DAY_NS
+    save_manifest(client, key, manifest)
+    hour = loaded(app, client, key)[0]
+    assert hour.provenance['book_coverage_intervals'] == [{
+        'start_ns': DAY_NS + 100, 'end_ns': DAY_NS + HOUR_NS}]
+    assert hour.provenance['book_coverage_gaps'] == [{
+        'start_ns': DAY_NS, 'end_ns': DAY_NS + 100}]
+    assert hour.provenance['book_coverage_complete'] is False
+
+
+def test_legacy_row_from_other_connection_preserves_previous_daily(app, tmp_path):
+    client = FakeS3()
+    _, _, key0 = add_legacy_hour(client, 0)
+    build(app, client, tmp_path, loaded(app, client, key0))
+    destination = output_path(tmp_path)
+    previous = destination.read_bytes()
+    rows = make_rows(1)
+    rows[1]['connection_id'] = 'different-connection'
+    _, _, key1 = add_legacy_hour(client, 1, rows=rows)
+    with pytest.raises(app.FetchError):
+        build(app, client, tmp_path, loaded(app, client, key0, key1))
+    assert destination.read_bytes() == previous
+    assert list(destination.parent.iterdir()) == [destination]

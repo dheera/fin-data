@@ -31,3 +31,11 @@ Descriptive coverage/gap and S3 provenance metadata is embedded in each Parquet
 footer. A current-day file contains only already-published hours; its existence
 does not mean the day or feed coverage is complete. See
 [dataset details](global_crypto/books/README.md).
+
+Both original schema-v2 direct hourly files and newer assembled hours are
+supported, with checksums, row counts and metadata validated for each format.
+`hours: 24` and `missing_hours: []` mean all hourly files were fetched;
+`book_coverage_complete: false` can still reflect recording gaps inside them.
+Output includes `book_coverage_gap_count`, `book_uncovered_seconds` (including
+unpublished hours), and `source_gap_count` (recorded diagnostic events).
+Refetching cannot restore updates that the collector never recorded.
