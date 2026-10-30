@@ -206,7 +206,9 @@ def build(app, client, output, hours, **kwargs):
 
 
 def output_path(root, asset='BTC', source='coinbase', day=DAY):
-    return root / 'books' / source / day / f'{day}-{asset}.parquet'
+    directory = (root / 'perpetuals' / 'kalshi' / 'books' if source == 'kalshi_perp'
+                 else root / 'global_crypto' / 'books' / ('binance' if source == 'binance_spot' else source))
+    return directory / day / f'{day}-{asset}.parquet'
 
 
 def test_partial_day_refresh_exact_rows_and_no_sidecars(app, tmp_path):
@@ -315,7 +317,8 @@ def test_kshib_uses_base_asset_without_rescaling(app, tmp_path):
     exact_table(pq.read_table(destination), expected)
 
 
-def test_latest_day_uses_valid_daily_names_per_asset(app, tmp_path):
+@pytest.mark.parametrize('source', ['coinbase', 'kalshi_perp', 'binance_spot'])
+def test_latest_day_uses_valid_daily_names_per_asset(app, tmp_path, source):
     files = [('2026-10-17', '2026-10-17-BTC.parquet'),
              ('2026-10-18', '2026-10-18-BTC.parquet'),
              ('2026-10-16', '2026-10-16-ETH.parquet'),
@@ -323,11 +326,11 @@ def test_latest_day_uses_valid_daily_names_per_asset(app, tmp_path):
              ('2026-10-18', '2026-10-19-ETH.parquet'),
              ('2026-10-18', '2026-10-18-ETH.parquet.partial')]
     for day, name in files:
-        p = tmp_path / 'books' / 'coinbase' / day / name
+        p = output_path(tmp_path, source=source, day=day).parent / name
         p.parent.mkdir(parents=True, exist_ok=True)
         p.touch()
-    assert app.latest_local_days(tmp_path, 'coinbase') == {'BTC': '2026-10-18', 'ETH': '2026-10-16'}
-    assert app.latest_local_days(tmp_path, 'coinbase', {'ETH'}) == {'ETH': '2026-10-16'}
+    assert app.latest_local_days(tmp_path, source) == {'BTC': '2026-10-18', 'ETH': '2026-10-16'}
+    assert app.latest_local_days(tmp_path, source, {'ETH'}) == {'ETH': '2026-10-16'}
 
 
 def test_default_backfills_asset_missing_locally(app, tmp_path):
@@ -633,3 +636,106 @@ def test_legacy_row_from_other_connection_preserves_previous_daily(app, tmp_path
         build(app, client, tmp_path, loaded(app, client, key0, key1))
     assert destination.read_bytes() == previous
     assert list(destination.parent.iterdir()) == [destination]
+
+
+def add_binance_hour(client, hour, *, asset='BTC', day=DAY):
+    """Match the archived Binance partial-depth semantics, with poison trades.
+
+    Trade references share the hourly manifest, but the book downloader must
+    never fetch them. Intentionally invalid trade bytes make that observable.
+    """
+    symbol = asset + 'USDT'
+    rows = make_rows(hour, source='binance_spot', symbol=symbol, day=day)
+    rows[0]['kind'] = 'snapshot'
+    for row in rows:
+        row.update(participant_timestamp=None, source_send_timestamp=None,
+                   source_ts_resolution_ns=None, source_ts_kind=None,
+                   native_sid=None)
+    manifest, table, key = add_hour(
+        client, hour, source='binance_spot', symbol=symbol, asset=asset, day=day,
+        rows=rows, metadata_updates={
+            'quote_currency': 'USDT', 'price_unit': 'USDT per ' + asset,
+            'native_price_unit': 'USDT per ' + asset, 'source_depth': 20,
+            'source_depth_kind': 'partial_aggregated_price_levels',
+            'channel': 'depth20@100ms+trade', 'cadence_ms': 100,
+            'book_source_timestamp': 'unavailable in partial-depth payload; receive timestamp retained',
+        })
+    trade_path = f'trades/binance_spot/{day}/{symbol}-{hour:02d}00.parquet'
+    poison = b'trades must never be downloaded by the daily book sync'
+    client.add('global_crypto/' + trade_path, poison)
+    client.add('global_crypto/' + trade_path.replace('.parquet', '.manifest.json'),
+               b'trade-only manifests must not even be discovered')
+    manifest['files'].append({'path': trade_path, 'table': 'trades', 'rows': 1,
+                              'size_bytes': len(poison), 'sha256': sha(poison)})
+    save_manifest(client, key, manifest)
+    return table
+
+
+@pytest.mark.parametrize('explicit_sources', [None, ['binance_spot'], ['binance'],
+                                             ['binance', 'binance_spot']])
+def test_binance_discovery_preserves_usdt_null_clocks_and_ignores_trades(
+        app, tmp_path, explicit_sources):
+    client = FakeS3()
+    expected = add_binance_hour(client, 7)
+    # Coexisting sources exercise automatic discovery and explicit isolation.
+    _, coinbase, _ = add_hour(client, 7)
+    _, kalshi, _ = add_hour(client, 7, source='kalshi_perp', symbol='KXBTCPERP')
+    options = ['--output', str(tmp_path), '--workers', '1', '--min-free-bytes', '0']
+    if explicit_sources:
+        options += ['--sources', *explicit_sources]
+    assert app.run(client, app.parse_args(options)) == 0
+
+    path = output_path(tmp_path, source='binance_spot')
+    assert path == tmp_path / 'global_crypto' / 'books' / 'binance' / DAY / f'{DAY}-BTC.parquet'
+    assert not (tmp_path / 'global_crypto' / 'books' / 'binance_spot').exists()
+    actual = pq.read_table(path)
+    exact_table(actual, expected)  # Includes float bits, nanoseconds and nulls.
+    info = json.loads(actual.schema.metadata[b'btc_book_recorder'])
+    assert info['symbol'] == 'BTCUSDT' and info['base_asset'] == 'BTC'
+    assert info['metadata']['quote_currency'] == 'USDT'
+    assert info['metadata']['price_unit'] == info['metadata']['native_price_unit'] == 'USDT per BTC'
+    assert info['metadata']['cadence_ms'] == 100
+    assert info['metadata']['source_depth_kind'] == 'partial_aggregated_price_levels'
+    assert actual['participant_timestamp'].null_count == actual.num_rows
+    assert actual['source_send_timestamp'].null_count == actual.num_rows
+    assert not any(key.startswith('global_crypto/trades/') for _, key in client.calls)
+    assert not (tmp_path / 'global_crypto' / 'trades').exists()
+    if explicit_sources:
+        assert not output_path(tmp_path).exists()
+        assert not output_path(tmp_path, source='kalshi_perp').exists()
+        assert all(key.startswith('global_crypto/books/binance_spot/') for _, key in client.calls)
+        assert sum(op == 'get' and key.endswith('.parquet') for op, key in client.calls) == 1
+    else:
+        exact_table(pq.read_table(output_path(tmp_path)), coinbase)
+        exact_table(pq.read_table(output_path(tmp_path, source='kalshi_perp')), kalshi)
+
+
+def test_binance_default_run_completes_previous_partial_day_and_starts_next(app, tmp_path):
+    client = FakeS3()
+    first = add_binance_hour(client, 7)
+    args = app.parse_args(['--output', str(tmp_path), '--sources', 'binance',
+                           '--workers', '1', '--min-free-bytes', '0'])
+    assert app.run(client, args) == 0
+    previous = output_path(tmp_path, source='binance_spot')
+    exact_table(pq.read_table(previous), first)
+
+    # On tomorrow's run, discovery sees the newer day first. The old latest day
+    # must still rebuild with its newly published hour instead of being skipped.
+    second = add_binance_hour(client, 8)
+    next_day = '2026-10-19'
+    tomorrow = add_binance_hour(client, 0, day=next_day)
+    other_source = output_path(tmp_path)
+    other_source.parent.mkdir(parents=True)
+    other_source.write_bytes(b'unselected source must remain untouched')
+    assert app.run(client, args) == 0
+    exact_table(pq.read_table(previous), pa.concat_tables([first, second]))
+    current = output_path(tmp_path, source='binance_spot', day=next_day)
+    exact_table(pq.read_table(current), tomorrow)
+    info = json.loads(pq.ParquetFile(previous).schema_arrow.metadata[b'btc_book_recorder'])
+    assert len(info['hours']) == 2
+    assert info['missing_hours'] == [f'{hour:02d}00' for hour in range(24) if hour not in (7, 8)]
+    assert info['book_coverage_complete'] is False
+    assert other_source.read_bytes() == b'unselected source must remain untouched'
+    assert list(previous.parent.iterdir()) == [previous]
+    assert list(current.parent.iterdir()) == [current]
+    assert not any(key.startswith('global_crypto/trades/') for _, key in client.calls)

@@ -12,6 +12,10 @@ echo "*** converting: forex day aggs"
 ./csv2parquet_aggs.py global_forex/day_aggs_v1/ global_forex/day_aggs/ --utc --delete-original
 echo "*** converting: forex minute aggs"
 ./csv2parquet_aggs.py global_forex/minute_aggs_v1/ global_forex/minute_aggs/ --utc --delete-original
+echo "*** converting: crypto trades"
+./csv2parquet_crypto_trades.py global_crypto/trades_v1 global_crypto/trades --delete-original
+echo "*** converting: forex quotes"
+./csv2parquet_forex_quotes.py global_forex/quotes_v1 global_forex/quotes --delete-original
 echo "*** converting: stocks minute aggs"
 ./csv2parquet_aggs.py us_stocks_sip/minute_aggs_v1/ us_stocks_sip/minute_aggs/ --delete-original
 echo "*** converting: stocks day aggs"
@@ -33,17 +37,18 @@ echo "*** converting: futures minute aggs"
 sleep 1
 
 echo "*** converting stocks/trades"
-./csv2parquet_stocks_trades.py us_stocks_sip/trades_v1 us_stocks_sip/trades --delete-original --workers 16
+./csv2parquet_stocks_trades.py us_stocks_sip/trades_v1 us_stocks_sip/trades --delete-original --workers 4
 
 sleep 1
 
 echo "*** converting stocks/quotes"
-./csv2parquet_stocks_quotes.py us_stocks_sip/quotes_v1 us_stocks_sip/quotes --delete-original --workers 16
+./csv2parquet_stocks_quotes.py us_stocks_sip/quotes_v1 us_stocks_sip/quotes --delete-original --workers 4
 
 sleep 1
 
 echo "*** converting options/trades"
 ./csv2parquet_options_trades.py us_options_opra/trades_v1 us_options_opra/trades --delete-original
+./csv2parquet_options_quotes.py us_options_opra/quotes_v1 us_options_opra/quotes --delete-original
 
 sleep 1
 
@@ -70,6 +75,9 @@ sleep 1
 echo "*** fetching tickers"
 ./download_tickers.py
 
+echo "*** fetching ticker changes"
+./download_ticker_changes.py
+
 echo "*** fetching splits"
 ./download_splits.py
 
@@ -78,6 +86,12 @@ echo "*** fetching dividends"
 
 echo "*** generating stocks/day_aggs_by_ticker"
 ./gen_aggs_by_ticker.py --agg_type day us_stocks_sip/day_aggs us_stocks_sip/day_aggs_by_ticker/ --recent_days 10000
+
+echo "*** generating stocks/security_history"
+./gen_security_history.py
+
+echo "*** generating stocks/adjustment_factors"
+./gen_adjustment_factors.py
 
 ./gen_last_n_day_aggs.py us_stocks_sip/day_aggs --recent-days 2920
 ./gen_last_n_day_aggs.py us_stocks_sip/day_aggs --recent-days 1460

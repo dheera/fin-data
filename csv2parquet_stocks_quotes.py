@@ -107,7 +107,7 @@ if __name__ == "__main__":
                 continue
             date_str = os.path.basename(csv_file).split('.')[0]  # Extract date from filename
             out_dir = os.path.join(args.out_dir, date_str)
-            if os.path.exists(out_dir) and len(os.listdir(out_dir)) > 9000:
+            if os.path.exists(out_dir) and len(os.listdir(out_dir)) > 8000:
                 if args.delete_original:
                     print(f"Deleting original {csv_file}")
                     os.remove(csv_file)

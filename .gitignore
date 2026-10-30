@@ -1,9 +1,13 @@
 # Local credentials and machine-specific configuration
+/api_keys/*.json
+/api_keys/*.key
+/api_keys/*.gpg
 alpaca.json
 finnhub.json
 kalshi.json
 kalshi.key
 polygon.json
+aws.json
 .claude/
 
 # Generated/downloaded data and runtime artifacts
@@ -29,3 +33,17 @@ us_futures_nymex/
 us_indices/
 us_options_opra/
 us_stocks_sip/
+_archive_backups/
+apify/
+btc_book_recorder/
+btc_oracle/
+carbonarc/
+perpetuals/
+alt_data/supplementary/
+rtpr/articles/
+rtpr/events/
+rtpr/metadata/
+rtpr/reports/
+rtpr/.state/
+rtpr/manifest.json
+.archive.lock

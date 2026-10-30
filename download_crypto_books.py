@@ -1,10 +1,45 @@
 #!/usr/bin/env python3
-"""Fetch committed S3 books into daily Parquets, without a progress database.
+"""Download hourly S3 order books and assemble one Parquet per asset/UTC day.
 
-Default: rebuild each asset's latest local UTC day and any newer available days.
-Cold start: fetch all available days. --date / --rebuild-all repair older data.
-Every selected file is rebuilt from authoritative S3 hours, never appended to.
-Requires: boto3, pyarrow. Credentials default to api_keys/crypto-data-recorder-aws.json.
+Typical usage (run from /data/fin):
+    ./download_crypto_books.py                            # All published book sources
+    ./download_crypto_books.py --sources binance          # Binance spot books only
+    ./download_crypto_books.py --sources binance --assets BTC ETH
+    ./download_crypto_books.py --date 2026-10-20 --dry-run # Validate/preview a day
+
+Data flow:
+    1. Discover sources/dates under s3://fin.dheera.net/global_crypto/books/.
+    2. Read finalized hourly manifests to learn native symbols and base assets.
+    3. Choose days from local daily filenames, with no saved progress database.
+    4. Download/check one hourly book file at a time for each daily worker.
+    5. Stream unchanged Arrow rows into a temporary daily file, then replace
+       the destination atomically only after the entire selected day validates.
+
+Local destinations (relative to --output, which defaults to this directory):
+    global_crypto/books/coinbase/<date>/<date>-BTC.parquet
+    global_crypto/books/binance/<date>/<date>-BTC.parquet
+    perpetuals/kalshi/books/<date>/<date>-BTC.parquet
+
+An unrestricted run discovers Coinbase, Kalshi perps, Binance spot, and any
+other source publishing this same book format. It never downloads trades,
+including trade objects referenced by the same hourly commit manifest.
+The local Binance directory is binance because global_crypto contains spot
+data. Its S3 source and row/provenance values remain binance_spot; --sources
+accepts either name and resolves it to the same S3 inputs.
+Binance BTCUSDT is named BTC locally, but its prices remain USDT, its row symbol
+remains BTCUSDT, and absent exchange timestamps remain null. No price conversion,
+resampling, timestamp substitution or deduplication happens here.
+
+Each asset's latest local UTC day is rebuilt on every default run, along with
+newer days and missing daily files. Thus running today can write a partial day;
+running tomorrow completes that day from the hours available then. Cold starts
+fetch all published days. Existing days older than the latest local day are
+assumed complete: --date, a date range or --rebuild-all repairs those explicitly.
+Every selected file is rebuilt from S3; existing local rows are never appended.
+
+Requires boto3 and pyarrow. Credentials default to
+api_keys/crypto-data-recorder-aws.json; credentials and remote response bodies
+must never be printed. This program reads S3 and writes local data only.
 """
 from __future__ import annotations
 
@@ -30,6 +65,8 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
+# All archive windows are UTC and half-open: start <= timestamp < end.
+# Integer nanoseconds avoid rounding receipt clocks through floats/datetimes.
 HERE = Path(__file__).resolve().parent
 HOUR_NS = 3_600_000_000_000
 DAY_NS = 24 * HOUR_NS
@@ -38,6 +75,10 @@ NAME = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,100}\Z')
 ASSET = re.compile(r'[A-Z0-9][A-Z0-9_.-]{0,39}\Z')
 SOURCE = re.compile(r'[a-z0-9][a-z0-9_]{0,39}\Z')
 DAILY = re.compile(r'(\d{4}-\d{2}-\d{2})-([A-Z0-9][A-Z0-9_.-]{0,39})\.parquet\Z')
+# Hours may have different connection IDs or operational metadata, but these
+# fields define how to interpret values. A daily file must never silently mix
+# USD/USDT, different native instruments, scaling conventions or feed cadences.
+# Filenames alone (e.g. BTC) cannot tell a researcher which currency prices use.
 INTERPRETATION = (
     'source', 'symbol', 'base_asset', 'native_asset', 'quote_currency',
     'price_unit', 'size_unit', 'native_price_unit', 'native_size_unit',
@@ -48,19 +89,23 @@ INTERPRETATION = (
 
 
 class FetchError(RuntimeError):
+    """A controlled validation error whose message is safe for JSON logs."""
     pass
 
 
 def require(condition, message):
+    """Use explicit checks, not assertions that disappear under python -O."""
     if not condition:
         raise FetchError(message)
 
 
 def encoded(value):
+    """Stable, finite JSON for embedded provenance and identity comparisons."""
     return json.dumps(value, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()
 
 
 def parse_day(value):
+    """Accept only canonical YYYY-MM-DD dates; reject alternative spellings."""
     try:
         result = date.fromisoformat(value)
     except (TypeError, ValueError):
@@ -70,10 +115,17 @@ def parse_day(value):
 
 
 def day_ns(day):
+    """Return midnight UTC as exact integer nanoseconds since the Unix epoch."""
     return (parse_day(day) - date(1970, 1, 1)).days * DAY_NS
 
 
 def safe_path(root, *parts):
+    """Keep archive-supplied path components inside the requested local root.
+
+    Native symbols and dates come from remote metadata. Reject separators,
+    traversal and existing symlink components before using them as filenames.
+    This is a path guard, not protection against a hostile concurrent local user.
+    """
     root = Path(root).resolve()
     path = root
     for part in parts:
@@ -85,10 +137,12 @@ def safe_path(root, *parts):
 
 
 def check_space(path, minimum, extra=0):
+    """Preserve a free-space reserve before a planned allocation/write."""
     require(shutil.disk_usage(path).free >= minimum + extra, 'insufficient free disk space')
 
 
 def fsync_dir(path):
+    """Persist the renamed directory entry after the daily file is fsynced."""
     fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
     try:
         os.fsync(fd)
@@ -98,6 +152,12 @@ def fsync_dir(path):
 
 @contextmanager
 def output_lock(root):
+    """Allow one writer invocation per data root, including overlapping cron runs.
+
+    The empty lock file contains no progress or completion state. Its descriptor
+    owns the advisory lock; closing it releases the lock even after an exception.
+    Dry-run callers skip this lock because they do not modify the data root.
+    """
     # This is an empty mutual-exclusion lock, not saved download progress.
     root.mkdir(parents=True, exist_ok=True)
     fd = os.open(safe_path(root, '.archive.lock'), os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o660)
@@ -112,6 +172,12 @@ def output_lock(root):
 
 
 def make_client(credentials, region):
+    """Create a shared read client without logging any credential material.
+
+    An explicit JSON file is the local NAS default. Passing None delegates to
+    boto3's usual credential chain. Retries cover S3 request failures; a failed
+    streaming-body read still aborts the daily replacement, preserving old data.
+    """
     kwargs = {}
     if credentials is not None:
         try:
@@ -128,6 +194,11 @@ def make_client(credentials, region):
 
 
 def list_children(client, bucket, prefix):
+    """List immediate S3 prefix children, not every object recursively.
+
+    S3 has keys rather than real directories. Delimiter='/' provides the source
+    and date "directory" view, while pagination handles arbitrarily many keys.
+    """
     for page in client.get_paginator('list_objects_v2').paginate(
             Bucket=bucket, Prefix=prefix, Delimiter='/'):
         for entry in page.get('CommonPrefixes', []):
@@ -136,10 +207,31 @@ def list_children(client, bucket, prefix):
                 yield child
 
 
+def books_directory(root, source):
+    """Map the archive source to the existing /data/fin directory conventions.
+
+    Kalshi is a perpetuals dataset with its established local path. Binance's
+    local venue directory is simply binance: global_crypto already means spot.
+    Keep binance_spot in S3 keys and provenance to identify the original inputs.
+    This directory mapping does not alter any row values or quote currencies.
+    """
+    if source == 'kalshi_perp':
+        return safe_path(root, 'perpetuals', 'kalshi', 'books')
+    if source == 'binance_spot':
+        source = 'binance'
+    return safe_path(root, 'global_crypto', 'books', source)
+
+
 def latest_local_days(root, source, assets=None):
-    """Use daily data filenames only; no markers, sidecars or completion flags."""
+    """Infer each asset's newest local date using only canonical daily filenames.
+
+    A BTC-USD-1200.parquet hourly file, a .partial file, a wrong-date filename
+    or a symlink is not a completed daily output. Do not open Parquet contents
+    here: a corrupt newest file must still be selected and rebuilt from S3.
+    Sources have separate roots, so Coinbase BTC never marks Binance BTC done.
+    """
     result = {}
-    directory = safe_path(root, 'books', source)
+    directory = books_directory(root, source)
     if not directory.exists():
         return result
     for folder in directory.iterdir():
@@ -159,6 +251,13 @@ def latest_local_days(root, source, assets=None):
 
 
 def read_manifest(client, bucket, key):
+    """Read a bounded commit manifest and verify S3's native SHA-256 checksum.
+
+    The manifest is the authoritative list of committed hourly data objects.
+    Discovering an arbitrary .parquet key alone is not evidence it is committed.
+    ETags are deliberately not used as hashes: multipart/encrypted objects can
+    have ETags that are not a content MD5.
+    """
     response = client.get_object(Bucket=bucket, Key=key, ChecksumMode='ENABLED')
     body = response['Body']
     try:
@@ -178,6 +277,11 @@ def read_manifest(client, bucket, key):
 
 @dataclass
 class Hour:
+    """Validated description of one committed book hour; no book rows in RAM.
+
+    entry references only the book object. provenance retains coverage and
+    collector/source identities for the eventual daily Parquet footer.
+    """
     key: str
     manifest_sha256: str
     source: str
@@ -198,6 +302,9 @@ def legacy_hour_provenance(manifest, start, end):
     Before hourly assembly, finalized schema-v2 chunks were published directly
     under the same canonical hourly paths. Only a single canonical first part
     is accepted here; private minute segments and unmerged parts are not hours.
+    Transport coverage may start before a reconstructible snapshot exists, so
+    keep transport and usable-book coverage separate. Unknown coverage is not
+    filled from the first/last row or upgraded to a claim of completeness.
     """
     require(type(manifest.get('part_number')) is int and manifest['part_number'] == 1,
             'legacy canonical hour must be a single first part')
@@ -238,6 +345,13 @@ def legacy_hour_provenance(manifest, start, end):
 
 
 def load_hour(client, bucket, prefix, key):
+    """Validate identity/path/units and select the BOOK object from a manifest.
+
+    This recognizes both original direct-hour manifests and assembled hours.
+    A manifest can describe books AND trades; selecting table='books' below is
+    intentional. Never infer an asset by stripping a symbol suffix: metadata's
+    base_asset maps BTC-USD/BTCUSDT to BTC and KXKSHIBPERP to SHIB correctly.
+    """
     relative = key.removeprefix(prefix)
     parts = relative.split('/')
     require(key.startswith(prefix) and len(parts) == 4 and parts[0] == 'books', 'invalid manifest key')
@@ -264,6 +378,8 @@ def load_hour(client, bucket, prefix, key):
     require(metadata.get('source') == source and metadata.get('symbol') == symbol,
             'instrument metadata identity mismatch')
     require(type(m.get('analysis_depth')) is int and m['analysis_depth'] > 0, 'invalid analysis depth')
+    # Do not enqueue trade objects, even when their checksums/paths appear next
+    # to the book reference. The user requested a books-only local mirror.
     entries = [f for f in m.get('files', []) if f.get('table') == 'books']
     require(len(entries) == 1, 'expected exactly one committed book file per hour')
     entry = entries[0]
@@ -279,6 +395,8 @@ def load_hour(client, bucket, prefix, key):
         provenance = legacy_hour_provenance(m, start, end)
     else:
         provenance = {k: m.get(k) for k in fields}
+        # Many private minute fragments share one connection/collector. Keep
+        # each distinct identity once; keep hourly coverage diagnostics too.
         identities = {}
         for segment in m.get('segments', []):
             original = segment['manifest']
@@ -293,6 +411,12 @@ def load_hour(client, bucket, prefix, key):
 
 
 def merged_intervals(hours, field, start, end):
+    """Union recorded coverage, then return its complement within the UTC day.
+
+    Missing published hours and intra-hour reconnect gaps both remain visible.
+    Touching intervals merge; disconnected intervals do not. These calculations
+    describe the archived data and never generate rows to fill the gaps.
+    """
     intervals = []
     for hour in hours:
         values = hour.provenance.get(field)
@@ -320,6 +444,12 @@ def merged_intervals(hours, field, start, end):
 
 
 def daily_metadata(hours):
+    """Build descriptive daily provenance and reject incompatible hourly inputs.
+
+    This metadata is embedded in the output, not read back as resume state.
+    Twenty-four hour files can still have gaps; completeness needs both the
+    interval union and the original per-hour completeness flags.
+    """
     require(bool(hours), 'no committed hours')
     first = hours[0]
     require(len({h.start_ns for h in hours}) == len(hours), 'duplicate hourly input')
@@ -330,6 +460,10 @@ def daily_metadata(hours):
         require(all(hour.metadata.get(k) == first.metadata.get(k) for k in INTERPRETATION),
                 'incompatible units or feed semantics across hours')
     start = day_ns(first.day)
+    # Keep constant venue metadata once. Fields allowed to vary across hours
+    # are not falsely advertised as constant; authoritative manifests remain
+    # referenced in hours[]. Units and other interpretation fields were checked
+    # above, so Binance USDT cannot be blended with USD in this daily output.
     common = {k: v for k, v in first.metadata.items() if all(h.metadata.get(k) == v for h in hours)}
     info = dict(schema_version=2, record_type='daily_books', source=first.source,
                 symbol=first.symbol, base_asset=first.asset, interval_start_ns=start,
@@ -348,6 +482,12 @@ def daily_metadata(hours):
 
 
 def download_hour(client, bucket, prefix, hour, path):
+    """Stream one book object to disk and verify two independent commitments.
+
+    The byte count/hash must match both the hourly manifest and S3's checksum.
+    A truncated response or changed object fails before replacing a daily file.
+    Only this one incoming hourly object is retained per worker at a time.
+    """
     response = client.get_object(Bucket=bucket, Key=prefix + hour.entry['path'], ChecksumMode='ENABLED')
     body, sha, count = response['Body'], hashlib.sha256(), 0
     try:
@@ -367,6 +507,14 @@ def download_hour(client, bucket, prefix, hour, path):
 
 
 def checked_batches(path, hour, batch_rows, expected_schema):
+    """Yield bounded batches only after schema, identity and ordering checks.
+
+    Each hour must agree with its manifest, and all hours in a day must share
+    one schema. Receipt clocks must be present, ordered and inside the hour.
+    Exchange clocks may be null (notably Binance partial-depth books), and
+    checkpoints may refer to an older state_asof_timestamp. Preserve these
+    values unchanged; receipt time alone decides which archive hour holds a row.
+    """
     with pq.ParquetFile(path) as parquet:
         schema = parquet.schema_arrow.remove_metadata()
         require(expected_schema is None or schema == expected_schema, 'incompatible Parquet schemas')
@@ -411,6 +559,8 @@ def checked_batches(path, hour, batch_rows, expected_schema):
                 require(connections.null_count == 0 and
                         pc.all(pc.equal(connections, legacy['connection_id'])).as_py(),
                         'legacy row connection mismatch')
+            # Validate both within-batch and cross-batch order. Equal keys are
+            # permitted: this downloader never discards ties or duplicate rows.
             first_key, last_key = (times[0].as_py(), sequences[0].as_py()), (times[-1].as_py(), sequences[-1].as_py())
             require(previous is None or previous <= first_key, 'unordered hourly row boundary')
             if len(times) > 1:
@@ -426,12 +576,19 @@ def checked_batches(path, hour, batch_rows, expected_schema):
 
 def build_day(client, bucket, prefix, output_root, hours, *, batch_rows=32768,
               min_free_bytes=1_000_000_000):
-    """Rebuild one day from S3 regardless of any existing local file contents."""
+    """Rebuild a single source/asset/day and publish it with an atomic rename.
+
+    Existing bytes are never input. The old final file stays intact until all
+    selected hours download, validate and flush successfully. At most one hour
+    file plus a bounded Arrow batch and the growing output are staged per
+    worker. The disk estimate is conservative, not an exact Parquet-size bound;
+    repeated free-space checks retain the reserve as compressed output grows.
+    """
     hours = sorted(hours, key=lambda hour: hour.start_ns)
     info = daily_metadata(hours)
     info['bucket'] = bucket
     first = hours[0]
-    destination = safe_path(output_root, 'books', first.source, first.day,
+    destination = safe_path(books_directory(output_root, first.source), first.day,
                             f'{first.day}-{first.asset}.parquet')
     destination.parent.mkdir(parents=True, exist_ok=True)
     check_space(destination.parent, min_free_bytes,
@@ -449,6 +606,9 @@ def build_day(client, bucket, prefix, output_root, hours, *, batch_rows=32768,
                     current_schema = parquet.schema_arrow.remove_metadata()
                 require(schema is None or current_schema == schema, 'incompatible Parquet schemas')
                 if writer is None:
+                    # Re-encode the same Arrow values for a daily container.
+                    # Parquet 2.6 retains nanosecond timestamps; dictionary and
+                    # delta encodings change storage only, not values or units.
                     schema = current_schema
                     output_schema = schema.with_metadata({b'btc_book_recorder': encoded(info)})
                     dictionaries = [c for c in ('source', 'symbol', 'connection_id', 'kind', 'source_ts_kind') if c in schema.names]
@@ -461,6 +621,9 @@ def build_day(client, bucket, prefix, output_root, hours, *, batch_rows=32768,
                     writer.write_batch(batch, row_group_size=batch_rows)
                     rows += batch.num_rows
                 incoming.unlink()
+            # Closing writes the Parquet footer. Verify it, fsync the file,
+            # rename on the same filesystem, then fsync its directory entry.
+            # Any earlier failure exits through TemporaryDirectory cleanup.
             writer.close()
             writer = None
             require(rows == sum(h.entry['rows'] for h in hours), 'daily row count mismatch')
@@ -488,14 +651,16 @@ def build_day(client, bucket, prefix, output_root, hours, *, batch_rows=32768,
 
 
 def parse_args(argv=None):
+    """Parse filters/resources without reading credentials or contacting S3."""
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('--bucket', default='fin.dheera.net')
     parser.add_argument('--prefix', default='global_crypto/')
     parser.add_argument('--region', default='us-east-1')
     parser.add_argument('--credentials', type=Path, default=HERE/'api_keys/crypto-data-recorder-aws.json')
     parser.add_argument('--default-aws-credentials', action='store_true', help='Use the normal AWS credential provider chain')
-    parser.add_argument('--output', type=Path, default=HERE/'global_crypto', help='Dataset root containing books/')
-    parser.add_argument('--sources', nargs='+', help='Default: all exchanges present under S3 books/')
+    parser.add_argument('--output', type=Path, default=HERE, help='Data root containing global_crypto/ and perpetuals/ (default: script directory)')
+    parser.add_argument('--sources', nargs='+',
+                        help='Default: autodiscover all S3 book sources, including coinbase, kalshi_perp and binance_spot; use --sources binance for Binance books only (binance_spot is also accepted)')
     parser.add_argument('--assets', nargs='+', help='Normalized base assets, e.g. BTC ETH SHIB')
     parser.add_argument('--date', help='Rebuild this UTC day, even if older than local data')
     parser.add_argument('--start-date', help='Inclusive UTC start date; rebuild every selected day')
@@ -514,6 +679,12 @@ def parse_args(argv=None):
             parse_day(day)
     require(not (args.start_date and args.end_date and args.start_date > args.end_date), 'reversed date range')
     require(all(SOURCE.fullmatch(s) for s in (args.sources or [])), 'invalid source filter')
+    if args.sources:
+        # Accept the local venue name while continuing to read the original S3
+        # prefix. Deduplicate aliases so specifying both cannot rebuild a day
+        # twice. Only the CLI filter changes; archived source values stay exact.
+        args.sources = list(dict.fromkeys(
+            'binance_spot' if s == 'binance' else s for s in args.sources))
     if args.assets:
         args.assets = set(a.upper() for a in args.assets)
         require(all(ASSET.fullmatch(a) for a in args.assets), 'invalid asset filter')
@@ -523,11 +694,21 @@ def parse_args(argv=None):
 
 
 def run(client, args):
+    """Discover committed inputs, select daily rebuilds, then execute the plan.
+
+    Discovery is deliberately source-agnostic: adding binance_spot to S3 books/
+    automatically includes it in unrestricted runs and the existing daily
+    updater. All listing prefixes stay under books/; trades are out of scope.
+    Small pools fetch manifests; a separate bounded pool builds daily files.
+    """
     sources = args.sources or sorted(s for s in list_children(client, args.bucket, args.prefix+'books/') if SOURCE.fullmatch(s))
     written = failed = skipped = 0
     explicit = bool(args.date or args.start_date or args.end_date or args.rebuild_all)
     for source in sources:
         base = args.prefix + 'books/' + source + '/'
+        # Freeze this map BEFORE writing any files. If today's run first builds
+        # tomorrow's/newer day, yesterday must still be refreshed later in this
+        # same newest-first traversal. Updating latest in the loop would skip it.
         latest = latest_local_days(args.output, source, args.assets)
         symbol_assets = {}  # Ephemeral lookup only; never persisted between runs.
         days = []
@@ -553,6 +734,9 @@ def run(client, args):
                 require(match is not None, 'noncanonical hourly manifest: ' + key)
                 symbol_keys.setdefault(match[1], []).append(key)
             preloaded = {}
+            # One manifest reveals an unfamiliar native symbol's base asset.
+            # Cache it only for this invocation; never infer BTC from BTCUSDT
+            # string slicing or store a persistent symbol/progress ledger.
             unknown = [items[0] for symbol, items in symbol_keys.items() if symbol not in symbol_assets]
             with ThreadPoolExecutor(max_workers=min(4, args.workers)) as pool:
                 for hour in pool.map(lambda key: load_hour(client, args.bucket, args.prefix, key), unknown):
@@ -563,7 +747,10 @@ def run(client, args):
                     asset = symbol_assets[symbol]
                     if args.assets and asset not in args.assets:
                         continue
-                    destination = safe_path(args.output, 'books', source, day, f'{day}-{asset}.parquet')
+                    destination = safe_path(books_directory(args.output, source), day, f'{day}-{asset}.parquet')
+                    # Only OLD, EXISTING daily files are skipped by default.
+                    # The latest date always rebuilds, and a missing older file
+                    # backfills even if this asset has newer local data.
                     if not explicit and day < latest.get(asset, '') and destination.is_file():
                         skipped += 1
                         continue
@@ -578,13 +765,18 @@ def run(client, args):
                 daily_metadata(sorted(hours, key=lambda h: h.start_ns))
                 selected.append(hours)
             if args.dry_run:
+                # Manifests and daily compatibility are checked, but no book
+                # Parquet is fetched and no local output/lock is created.
                 for hours in selected:
                     h = hours[0]
                     print(json.dumps(dict(event='planned', source=source, day=day, asset=h.asset,
+                        path=str(safe_path(books_directory(args.output, source), day, f'{day}-{h.asset}.parquet')),
                         hours=len(hours), rows=sum(x.entry['rows'] for x in hours),
                         download_bytes=sum(x.entry['size_bytes'] for x in hours))), flush=True)
                 continue
             with ThreadPoolExecutor(max_workers=args.workers) as pool:
+                # Each job writes a different daily path. A failed job preserves
+                # that path's previous file; unrelated jobs can still complete.
                 jobs = {pool.submit(build_day, client, args.bucket, args.prefix, args.output, hours,
                                     batch_rows=args.batch_rows, min_free_bytes=args.min_free_bytes): hours[0]
                         for hours in selected}
@@ -605,6 +797,12 @@ def run(client, args):
 
 
 def main(argv=None):
+    """Run with one output-root lock and return a scheduler-friendly exit code.
+
+    Controlled FetchError messages explain safe validation failures. Unexpected
+    exceptions are logged by class only, avoiding SDK response/credential leaks.
+    Nonzero exit means at least one daily file failed or discovery aborted.
+    """
     try:
         args = parse_args(argv)
         client = make_client(None if args.default_aws_credentials else args.credentials, args.region)

@@ -8,6 +8,7 @@ from glob import glob
 from tqdm import tqdm
 from datetime import datetime, timedelta
 import concurrent.futures
+from functools import partial
 
 # New York timezone identifier
 NY_TZ = "America/New_York"
@@ -71,15 +72,29 @@ def get_latest_window_starts(output_dir):
         except Exception as e:
             print(f"Error reading {file}: {e}")
             continue
-        if not df.empty:
+        # window_start is the index, so the frame has no columns and df.empty is always True.
+        if len(df.index):
             latest_windows[ticker] = df.index.max()
     return latest_windows
 
-def read_file(file):
+def drop_written_rows(df, latest_windows):
+    """
+    Keeps only rows newer than each ticker's latest window_start already on disk, so only
+    new data is held in memory. Tickers without an output file keep all rows.
+    """
+    if not latest_windows or df.empty:
+        return df
+    cutoff = pd.Series(df.index.get_level_values("ticker")).map(latest_windows)
+    window = pd.Series(df.index.get_level_values("window_start"))
+    keep = cutoff.isna() | (window > cutoff)
+    return df[keep.to_numpy()]
+
+def read_file(file, latest_windows=None):
     """
     Reads a Parquet file and ensures that the DataFrame is indexed by ['ticker', 'window_start'].
     Handles cases where the file already has window_start as the index with ticker as a column.
-    Also converts the 'window_start' timestamps to New York time.
+    Also converts the 'window_start' timestamps to New York time and drops rows already
+    written to the per-ticker outputs.
     """
     try:
         df = pd.read_parquet(file)
@@ -99,6 +114,7 @@ def read_file(file):
                 [df.index.get_level_values("ticker"), win_vals],
                 names=["ticker", "window_start"]
             )
+            df = drop_written_rows(df, latest_windows)
         else:
             # If the index is named "window_start" and "ticker" is a column, reset it.
             if df.index.name == "window_start" and "ticker" in df.columns:
@@ -113,7 +129,7 @@ def read_file(file):
             else:
                 df["window_start"] = df["window_start"].dt.tz_convert(NY_TZ)
             df = df.set_index(["ticker", "window_start"])
-        return df
+        return drop_written_rows(df, latest_windows)
     except Exception as e:
         print(f"Error reading {file}: {e}")
         return None
@@ -179,32 +195,35 @@ def process_aggs(input_dir, output_dir, agg_type="day", period_days=365, start_d
         print("No files found in the specified date range or period in the input directory.")
         return
 
+    # Get the latest window_start per ticker from existing output files
+    latest_windows = get_latest_window_starts(output_dir)
+
+    # Workers drop already-written rows, so memory scales with new data, not the whole range.
     print("Reading all Parquet files concurrently...")
-    with concurrent.futures.ProcessPoolExecutor() as executor:
-        dfs = list(tqdm(executor.map(read_file, selected_files),
+    with concurrent.futures.ProcessPoolExecutor(max_workers=8) as executor:
+        dfs = list(tqdm(executor.map(partial(read_file, latest_windows=latest_windows), selected_files),
                         total=len(selected_files),
                         desc="Reading Parquet Files"))
     # Filter out any failed reads
-    dfs = [df for df in dfs if df is not None]
+    dfs = [df for df in dfs if df is not None and not df.empty]
     if not dfs:
-        print("No dataframes could be read.")
+        print("No new rows to add.")
         return
 
     # Concatenate all the data and sort the MultiIndex
     all_df = pd.concat(dfs)
+    del dfs
     all_df = all_df.sort_index()
-
-    # Get the latest window_start per ticker from existing output files
-    latest_windows = get_latest_window_starts(output_dir)
 
     # Prepare tasks for each ticker group
     ticker_tasks = []
     for ticker, group in all_df.groupby(level=0):
         lw = latest_windows.get(ticker, None)
         ticker_tasks.append((ticker, group, output_dir, lw))
+    del all_df
 
     print("Processing ticker groups concurrently...")
-    with concurrent.futures.ProcessPoolExecutor() as executor:
+    with concurrent.futures.ProcessPoolExecutor(max_workers=8) as executor:
         list(tqdm(executor.map(process_ticker, ticker_tasks),
                   total=len(ticker_tasks),
                   desc="Processing Ticker Groups"))

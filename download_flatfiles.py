@@ -68,7 +68,6 @@ market_list = [
   'us_indices',
   'global_forex',
   'global_crypto',
-  'global_forex',
   'us_stocks_sip',
   'us_options_opra',
   'us_futures_cbot',
