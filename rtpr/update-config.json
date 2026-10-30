@@ -1,0 +1,6 @@
+{
+  "api_key_file": "../api_keys/rtpr.json",
+  "request_interval_s": 1.1,
+  "overlap_hours": 24,
+  "min_free_gib": 1
+}
